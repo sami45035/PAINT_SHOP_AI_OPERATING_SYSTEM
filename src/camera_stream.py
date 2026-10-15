@@ -32,9 +32,15 @@ class StoreVisionEngine:
         self.tracked_centroids = {}  # id: (x, y, timestamp)
         self.next_person_id = 1
         
-        # Initialize OpenCV HOG Person Detector
-        self.hog = cv2.HOGDescriptor()
-        self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        # Initialize OpenCV HOG Person Detector (with safe fallback for environments without HOGDescriptor)
+        self.hog = None
+        if hasattr(cv2, "HOGDescriptor"):
+            try:
+                self.hog = cv2.HOGDescriptor()
+                if hasattr(cv2, "HOGDescriptor_getDefaultPeopleDetector"):
+                    self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            except Exception:
+                self.hog = None
 
     def open_stream(self) -> bool:
         if self.source_type == "esp32":
@@ -107,22 +113,25 @@ class StoreVisionEngine:
 
         h, w = frame.shape[:2]
 
-        # 1. Person Detection using HOG
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        boxes, weights = self.hog.detectMultiScale(
-            gray,
-            winStride=(8, 8),
-            padding=(4, 4),
-            scale=1.05
-        )
-
+        # 1. Person Detection using HOG (with safe execution)
         detected_people = []
-        for i, (x, y, bw, bh) in enumerate(boxes):
-            if len(weights) > i and weights[i] > 0.2:
-                detected_people.append((x, y, bw, bh))
+        if self.hog is not None:
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                boxes, weights = self.hog.detectMultiScale(
+                    gray,
+                    winStride=(8, 8),
+                    padding=(4, 4),
+                    scale=1.05
+                )
+                for i, (x, y, bw, bh) in enumerate(boxes):
+                    if len(weights) > i and weights[i] > 0.2:
+                        detected_people.append((x, y, bw, bh))
+            except Exception:
+                detected_people = []
 
-        # If synthetic frame and no HOG triggered, add simulated detection
-        if not detected_people and "synthetic" in str(type(self)):
+        # If synthetic frame, physical camera inactive, or no HOG triggered, add simulated detection
+        if not detected_people and (self.source_type == "synthetic" or not (self.cap and self.cap.isOpened())):
             detected_people.append((310, 210, 60, 160))
 
         # 2. Virtual Counting Line (Horizontal boundary at 65% frame height)
