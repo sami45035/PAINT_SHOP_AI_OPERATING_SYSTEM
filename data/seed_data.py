@@ -16,6 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from src.config import DB_PATH, SHADES_CATALOG_PATH
+from src.clock import today as store_today
 
 def init_db():
     if DB_PATH.exists():
@@ -199,9 +200,11 @@ def populate_database(conn):
     conn.commit()
 
     # 3. Populate Inventory with Batches & Realistic Statuses
-    # Today reference: 2026-10-03
-    today = datetime(2026, 10, 3)
+    # The sample data ends on the day it is generated (store time zone).
+    # In demo mode the app keeps moving it forward so it always ends "today".
+    today = datetime.combine(store_today(), datetime.min.time())
 
+    slow_ids = set()   # deliberately slow sellers ("money stuck" demo)
     for idx, prod in enumerate(products_inserted):
         # We craft specific corner cases for realistic prototype demonstrations:
         # Case A: Low Stock (reorder triggered)
@@ -220,6 +223,7 @@ def populate_database(conn):
             expiry = today + timedelta(days=random.randint(12, 38))
         # Case C: Overstock / Slow-Moving Dead Stock
         elif idx in [8, 22, 39, 60, 78]:
+            slow_ids.add(prod["id"])
             stock = random.randint(35, 50)
             min_thresh = 6
             max_thresh = 20
@@ -232,11 +236,12 @@ def populate_database(conn):
             max_thresh = 30
             on_order = 20
             expiry = today + timedelta(days=random.randint(200, 450))
-        # Case E: Healthy Stock
+        # Case E: Healthy Stock (fast sellers are stocked deeper)
         else:
-            stock = random.randint(10, 28)
-            min_thresh = 6
-            max_thresh = 35
+            fast = any(k in prod["shade_name"] for k in ("White", "Beige", "Royale Blue")) or prod["category"] == "Primer"
+            stock = random.randint(40, 70) if fast else random.randint(10, 28)
+            min_thresh = 12 if fast else 6
+            max_thresh = 90 if fast else 35
             on_order = 0
             expiry = today + timedelta(days=random.randint(180, 500))
 
@@ -263,70 +268,61 @@ def populate_database(conn):
     popular_ids = [p["id"] for p in products_inserted if "White" in p["shade_name"] or "Beige" in p["shade_name"] or "Royale Blue" in p["shade_name"] or "Primer" in p["category"]]
     regular_ids = [p["id"] for p in products_inserted if p["id"] not in popular_ids]
 
-    # Generate daily sales and hourly footfall
+    # Generate hourly visitors first, then bills from those visitors, so that
+    # "bills per visitor" stays realistic (about 35-45%) hour by hour.
+    # Two recent evenings get a deliberate dip (busy store, few bills) so the
+    # "Many visitors, few bills" alert has something real to find.
+    dip_days = {(today - timedelta(days=1)).date(), (today - timedelta(days=4)).date()}
+
     cur_date = start_date
     while cur_date <= today:
         date_str = cur_date.strftime("%Y-%m-%d")
         is_weekend = cur_date.weekday() >= 5
-        
-        # Seasonal multiplier (October: Diwali season boost)
-        month_mult = 2.2 if cur_date.month in [10, 11] else (1.4 if cur_date.month in [8, 9] else 1.0)
-        daily_transactions_target = int(random.randint(8, 16) * (1.4 if is_weekend else 1.0) * month_mult)
+        season_mult = 1.6 if cur_date.month in [10, 11] else (1.25 if cur_date.month in [8, 9] else 1.0)
 
-        # Generate sales for the day
-        for _ in range(daily_transactions_target):
-            # Select product
-            if random.random() < 0.65 and popular_ids:
-                prod_id = random.choice(popular_ids)
-            else:
-                prod_id = random.choice(regular_ids)
-
-            p_info = next(p for p in products_inserted if p["id"] == prod_id)
-            c_type = random.choice(customer_types)
-
-            # Contractors buy higher volume (2 to 6 cans of 10L/20L)
-            qty = random.randint(2, 6) if c_type == "Contractor" else random.randint(1, 2)
-            unit_price = p_info["price"]
-            total = round(qty * unit_price, 2)
-
-            hour = random.choice([10, 11, 12, 14, 15, 16, 17, 18, 19])
-            minute = random.randint(0, 59)
-            second = random.randint(0, 59)
-            sale_time = f"{date_str} {hour:02d}:{minute:02d}:{second:02d}"
-
-            inv_no = f"INV-{inv_count}"
-            inv_count += 1
-
-            cursor.execute("""
-            INSERT INTO sales (invoice_no, product_id, quantity, unit_price, total_amount, sale_timestamp, customer_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
-            """, (inv_no, prod_id, qty, unit_price, total, sale_time, c_type))
-
-        # Generate hourly footfall for business hours (09:00 to 21:00)
         for hour in range(9, 21):
-            ts = f"{date_str} {hour:02d}:00:00"
-            # Peak hours are 11-13 and 17-20
             is_peak = (11 <= hour <= 13) or (17 <= hour <= 20)
-            base_visitors = random.randint(12, 25) if is_peak else random.randint(4, 10)
+            visitors = random.randint(3, 7) if is_peak else random.randint(1, 3)
             if is_weekend:
-                base_visitors = int(base_visitors * 1.5)
-            if cur_date.month in [10, 11]:
-                base_visitors = int(base_visitors * 1.6)
+                visitors = int(round(visitors * 1.4))
+            visitors = int(round(visitors * season_mult))
+            buy_rate = random.uniform(0.32, 0.46)
+            if cur_date.date() in dip_days and 17 <= hour <= 19:
+                visitors = int(visitors * 1.8) + 3
+                buy_rate = 0.12
 
-            count_in = base_visitors
-            count_out = int(base_visitors * random.uniform(0.85, 1.0))
-            occupancy = max(0, count_in - count_out + random.randint(1, 4))
+            bills = sum(1 for _ in range(visitors) if random.random() < buy_rate)
+            count_out = max(0, visitors - random.randint(0, 2))
+            occupancy = max(0, visitors - count_out)
             dwell = round(random.uniform(8.5, 24.0), 1)
-
             cursor.execute("""
             INSERT INTO footfall_logs (timestamp, count_in, count_out, occupancy, dwell_time_mins)
             VALUES (?, ?, ?, ?, ?);
-            """, (ts, count_in, count_out, occupancy, dwell))
+            """, (f"{date_str} {hour:02d}:00:00", visitors, count_out, occupancy, dwell))
+
+            for _ in range(bills):
+                if random.random() < 0.65 and popular_ids:
+                    prod_id = random.choice(popular_ids)
+                else:
+                    prod_id = random.choice(regular_ids)
+                    while prod_id in slow_ids and random.random() < 0.97:
+                        prod_id = random.choice(regular_ids)
+                p_info = next(p for p in products_inserted if p["id"] == prod_id)
+                c_type = random.choice(customer_types)
+                # Contractors buy higher volume (2 to 6 cans)
+                qty = random.randint(2, 6) if c_type == "Contractor" else random.randint(1, 2)
+                unit_price = p_info["price"]
+                sale_time = f"{date_str} {hour:02d}:{random.randint(0, 59):02d}:{random.randint(0, 59):02d}"
+                cursor.execute("""
+                INSERT INTO sales (invoice_no, product_id, quantity, unit_price, total_amount, sale_timestamp, customer_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """, (f"INV-{inv_count}", prod_id, qty, unit_price, round(qty * unit_price, 2), sale_time, c_type))
+                inv_count += 1
 
         cur_date += timedelta(days=1)
     conn.commit()
 
-    # 5. Populate Seasonal Calendar
+    # 5. Populate Seasonal Calendar (real calendar dates — update every year)
     seasonal_data = [
         ("Diwali Pre-Festival Surge", "2026-10-10", "2026-11-15", "Interior & Exterior Emulsions", 2.2, "Massive annual repainting tradition across households & commercial shops."),
         ("Post-Monsoon Waterproofing", "2026-09-01", "2026-10-15", "Waterproofing & Exterior Primer", 1.8, "Fixing moisture dampness, roof cracks, and exterior weathering."),

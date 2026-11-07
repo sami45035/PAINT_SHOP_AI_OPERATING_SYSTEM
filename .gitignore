@@ -15,6 +15,10 @@ ENV/
 .env.*.local
 .streamlit/secrets.toml
 
+# Downloaded wall model (fetched on first use) and camera alert photos
+models/
+data/security_snapshots/
+
 # IDEs & Editors
 .vscode/
 .idea/

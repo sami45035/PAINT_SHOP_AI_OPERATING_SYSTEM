@@ -1,77 +1,82 @@
-# 🎨 Paint Shop AI Operating System (AI-OS)
-> **An AI Operating System for Neighbourhood & Independent Paint Stores**  
-> Real-Time Prototype — Complete 7-Layer Architecture
+# Paint Shop AI — Apex Colors & Paints Studio
+> An AI assistant for independent paint shops: stock the right paint, stop waste and theft, and serve customers faster.
+> Real-time prototype built layer by layer.
 
 ---
 
-## 🌟 Overview & Value Proposition
-Small paint shops manage hundreds of shades, brands, pack sizes, seasonal spikes, walk-in customers, and complex purchasing decisions. Many decisions are traditionally made using memory, guesswork, or basic Excel sheets.
+## What's in it
 
-The **Paint Shop AI Operating System** unites **Sales Data + Inventory Intelligence + Computer Vision + Machine Learning + Generative AI** into a data-driven operating platform:
-- 🟢 **Sell Better**: AI Room Colour Assistant with wall segmentation, lighting-preserved recolouring, and in-stock shade matching.
-- 🔵 **Stock Smarter**: Demand forecasting incorporating supplier lead times, MOQs, festival multipliers (e.g. Diwali), and a Supplier Clearance Deal Evaluator.
-- 🟠 **Understand the Shop**: Low-cost vision sensors (Webcam / ESP32-CAM) tracking footfall, store conversion rates, peak hours, and event-based security alerts.
+| Screen | Question it answers | Layer |
+|---|---|---|
+| **Overview** | How is the shop doing today? | L1 data · L2 dashboard |
+| **Colour Studio** | How will this shade look on the customer's wall? | L6 |
+| **Stock & Reorder** (+ Deal Checker) | What should I order, how much, and by when? Is this supplier offer worth it? | L3 |
+| **Alerts** | What needs my attention right now? | L4 |
+| **Store Camera** | Who came in, and is the shop safe after closing? | L5 |
+| **Ask Aura** | Ask anything about the shop in plain words | L7 |
+
+## Architecture
+
+| Layer | Module | How it works |
+|---|---|---|
+| 1 · Shop data | `src/database.py`, `data/seed_data.py` | SQLite: products, inventory batches, suppliers, sales, hourly visitors, security events, season calendar. All dates come from `src/clock.py` (store time zone, India by default). |
+| 2 · Overview | `src/ui/pages/overview.py`, `src/dashboard_views.py` | KPIs, sales trend, visitors vs bills by hour. Conversion = bills ÷ visitors for the day. |
+| 3 · Forecast & reorder | `src/predictor.py` | Seasonally-adjusted 30-day moving average: the season effect is removed from past sales, then re-applied day by day going forward (a festival ending on 15 Nov only boosts demand until 15 Nov). Order quantity respects supplier lead time and minimum order. |
+| 4 · Alerts | `src/smart_alerts.py` | Running out before the supplier can deliver, batches expiring within 45 days, money stuck in slow sellers, days with many visitors but few bills. |
+| 5 · Store Camera | `src/camera_stream.py` | Laptop webcam or ESP32-CAM. HOG person detection, line-crossing door counts, after-hours motion guard and staff-only zone, one saved alert per minute with a photo. A clearly-labelled demo feed that never writes to the database. |
+| 6 · Colour Studio | `src/colour_studio/` | SegFormer (ADE20K) via ONNX Runtime finds walls and separates them from ceiling, doors, windows and furniture; walls are split at corners; light-preserving recolouring in linear RGB; room-aware shade suggestions; paint quantity planner. |
+| 7 · Ask Aura | `src/ai_assistant.py` | Gemini (optional) grounded in live shop data, with an offline mode for common questions. |
+
+UI system (names, colours, components) lives in `src/ui/theme.py` and `.streamlit/config.toml`.
 
 ---
 
-## 🏛️ 7-Layer Architecture
+## Quick start
 
-| Layer | Module | Description | Key Technologies |
-|---|---|---|---|
-| **Layer 1** | **Shop & Supplier Data** | Relational schema (`products`, `inventory`, `suppliers`, `sales`, `footfall_logs`, `security_events`, `seasonal_calendar`). | SQLite, Pandas |
-| **Layer 2** | **Executive Dashboard** | Real-time KPIs, revenue & volume trends, hourly footfall vs. sales conversion rate, category valuation, fast vs. slow-moving stock. | Streamlit, Plotly |
-| **Layer 3** | **Demand Predictor & Purchase Engine** | 7-day and 30-day forecasting with festival multipliers (Diwali surge 2.2x), lead-time reordering, and Supplier Clearance Evaluator. | Scikit-learn, NumPy |
-| **Layer 4** | **Smart Alerts Center** | Critical low-stock triggers, expiring batch liquidation promos, stagnant dead-capital remediation, and traffic conversion anomaly flags. | Python Rules Engine |
-| **Layer 5** | **Vision & Store Security** | Dual-input camera stream (Webcam + ESP32-CAM URL), person detection, directional footfall, after-hours motion sentry, restricted storage zone monitor. | OpenCV, HOG / Cascade |
-| **Layer 6** | **AI Room Colour Assistant** | Room photo upload, wall segmentation, photorealistic wall recolouring preserving natural textures/shadows, and physical catalog mapping. | OpenCV LAB Blending, NumPy |
-| **Layer 7** | **AI Shopkeeper Copilot (Aura)** | Conversational assistant querying inventory, explaining alerts, evaluating clearance lots, and recommending colors via Gemini (with offline fallback). | Google Gemini, `google-genai` |
+Python 3.10+.
 
----
-
-## 🚀 Quickstart Guide
-
-### 1. Requirements & Dependencies
-Ensure Python 3.10+ is installed:
 ```powershell
 pip install -r requirements.txt
-```
-
-### 2. Initialize Database & Seed Data
-Generate 96+ paint SKUs (Asian Paints, Berger, Dulux, Nerolac), realistic inventory batches, 180 days of sales, hourly footfall, and seasonal events:
-```powershell
-python data/seed_data.py
-```
-
-### 3. Run Automated Master Test Suite
-Verify all 7 architectural layers:
-```powershell
-python -m unittest tests/test_master.py -v
-```
-
-### 4. Launch the Streamlit Application
-```powershell
+python data/seed_data.py          # sample data ending today
+python -m pytest -q               # or: python -m unittest discover tests
 streamlit run app.py
 ```
-Open your browser at `http://localhost:8501`.
 
----
+Open `http://localhost:8501`.
 
-## 📹 ESP32-CAM Hardware Setup (Layer 5)
+### Demo mode
+The sample data is moved forward automatically so its last day is always "today" (expiry dates move with it). When the shop runs on real data, turn this off:
 
-1. Flash your **ESP32-CAM** with standard CameraWebServer example (or RTSP/MJPEG firmware).
-2. Connect the ESP32-CAM to your store's Wi-Fi network.
-3. Note the IP address assigned to the board (e.g. `192.168.1.100`).
-4. In the application sidebar under **📹 Camera Engine**, select **ESP32-CAM Stream** and paste your stream URL:
-   ```
-   http://192.168.1.100:81/stream
-   ```
-5. If the ESP32-CAM is not connected, the application seamlessly defaults to your **Laptop/USB Webcam** or **Simulated Store Camera**.
-
----
-
-## 🤖 Gemini API Setup (Optional)
-To enable live generative reasoning in Layer 7:
 ```powershell
-set GEMINI_API_KEY="your-gemini-api-key"
+set PAINT_SHOP_DEMO_MODE=0
 ```
-Or paste your key directly into the application sidebar. If no key is provided, the copilot runs in an **intelligent offline deterministic mode** answering all inventory, sales, reorder, and color queries without external network calls.
+
+---
+
+## Colour Studio: the wall model
+
+On first use, Colour Studio downloads the wall-finding model once (SegFormer-B3 trained on ADE20K, ONNX format, from Hugging Face: `Xenova/segformer-b3-finetuned-ade-512-512`) into `models/`. It runs on the CPU — no GPU needed.
+
+- **Faster but less accurate:** `set WALL_MODEL_REPO=Xenova/segformer-b0-finetuned-ade-512-512`
+- **Use a model file you already have:** `set WALL_MODEL_PATH=C:\path\to\model.onnx` (put its `config.json` next to it)
+- **No internet / download failed:** Colour Studio switches to **tap mode** — tap each wall on the photo and it grows the wall from that point, stopping at corners and edges.
+
+Licence note: NVIDIA's SegFormer weights are released for research / non-commercial use. Fine for this prototype; check the licence (or swap the model — it sits behind one class, `WallSegmenter`) before commercial use.
+
+To redraw the three sample rooms: `python data/make_sample_rooms.py`.
+
+---
+
+## Store Camera setup
+
+- **Laptop webcam:** works when the app runs on that laptop. On Streamlit Cloud the server can't see your laptop's camera — use the browser-camera snapshot on the same screen instead.
+- **ESP32-CAM:** flash the CameraWebServer example, join the shop Wi-Fi, then put the stream address (e.g. `http://192.168.1.100:81/stream`) in **Settings** in the sidebar.
+- Door line and staff-only zone can be adjusted on the Store Camera screen.
+- Alert photos are saved to `data/security_snapshots/`.
+
+## Gemini (optional)
+
+```powershell
+set GEMINI_API_KEY=your-key
+```
+or paste it under **Settings** in the sidebar, then switch Ask Aura to **Gemini**. Without a key Aura answers offline.

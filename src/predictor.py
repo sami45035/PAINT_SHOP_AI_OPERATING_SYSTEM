@@ -1,228 +1,242 @@
 """
-Sales Predictor, Lead-Time Purchase Engine & Supplier Clearance Evaluator (Layer 3)
+Sales Predictor, Reorder Planner & Supplier Deal Checker (Layer 3)
+
 Answers:
 1. What should I stock for the next 7 / 30 days?
-2. When should I place the order before supplier lead time runs out?
-3. Should the shop purchase a discounted supplier clearance batch?
+2. When must I order, given the supplier's lead time?
+3. Should the shop buy a discounted supplier clearance lot?
+
+Method (kept simple on purpose, as the project plan suggests):
+- Take the last 30 days of sales for each product.
+- Remove the season effect from that history (Diwali sales would otherwise be
+  counted twice), giving a "normal day" rate.
+- Walk forward day by day, multiplying the normal rate by whichever seasonal
+  events are active on THAT day — so a festival ending on 15 Nov only boosts
+  the forecast until 15 Nov.
 """
 import math
 import sqlite3
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
+
+from src import clock
 from src.config import DB_PATH
 
-def compute_sales_forecast(forecast_days: int = 30) -> pd.DataFrame:
-    """
-    Computes baseline sales velocity, applies active seasonal festival multipliers,
-    and calculates 7-day and 30-day demand forecasts per product.
-    """
+LOOKBACK_DAYS = 30
+SAFETY_DAYS = 5
+URGENCY_ORDER = {"CRITICAL_ORDER_NOW": 0, "ORDER_SOON": 1, "ON_ORDER": 2, "PLANNED": 3, "SUFFICIENT_STOCK": 4}
+LUXURY_FINISH_WORDS = ("Sheen", "Silk", "Luxury", "Satin", "Glo", "Gloss")
+
+
+def event_applies(category: str, finish: str, impact: str) -> bool:
+    """Does a seasonal event (by its impact_category text) affect this product?"""
+    category, finish, impact = category or "", finish or "", impact or ""
+    if "Emulsion" in impact and "Emulsion" in category:
+        if ("Interior" in impact and "Interior" in category) or ("Exterior" in impact and "Exterior" in category):
+            return True
+    if "Waterproofing" in impact and "Waterproofing" in category:
+        return True
+    if "Primer" in impact and category == "Primer":
+        return True
+    if ("Luxury" in impact or "Accent" in impact) and "Emulsion" in category and any(w in finish for w in LUXURY_FINISH_WORDS):
+        return True
+    return False
+
+
+def _multiplier_series(cal_df: pd.DataFrame, category: str, finish: str, days: List[date]) -> List[float]:
+    """Seasonal multiplier for each day (the strongest active event wins)."""
+    relevant = [
+        (ev["start"], ev["end"], float(ev["expected_multiplier"]))
+        for _, ev in cal_df.iterrows()
+        if event_applies(category, finish, ev["impact_category"])
+    ]
+    out = []
+    for d in days:
+        active = [m for s, e, m in relevant if s <= d <= e]
+        ups = [m for m in active if m >= 1]
+        downs = [m for m in active if m < 1]
+        out.append((max(ups) if ups else 1.0) * (min(downs) if downs else 1.0))
+    return out
+
+
+def _load_calendar(conn) -> pd.DataFrame:
+    cal = pd.read_sql_query("SELECT * FROM seasonal_calendar;", conn)
+    cal["start"] = pd.to_datetime(cal["start_date"]).dt.date
+    cal["end"] = pd.to_datetime(cal["end_date"]).dt.date
+    return cal
+
+
+def compute_sales_forecast(forecast_days: int = 30, on_day: Optional[date] = None) -> pd.DataFrame:
+    ref = on_day or clock.today()
     with sqlite3.connect(DB_PATH) as conn:
-        # 1. Fetch products & inventory
-        prod_query = """
-        SELECT 
-            p.id as product_id,
-            p.sku,
-            p.brand,
-            p.sub_brand,
-            p.shade_name,
-            p.category,
-            p.pack_size_litres,
-            p.cost_price,
-            p.selling_price,
-            i.current_stock,
-            i.on_order,
-            i.min_threshold,
-            s.id as supplier_id,
-            s.name as supplier_name,
-            s.lead_time_days,
-            s.moq_units
-        FROM products p
-        JOIN inventory i ON p.id = i.product_id
-        LEFT JOIN suppliers s ON p.supplier_id = s.id;
-        """
-        df = pd.read_sql_query(prod_query, conn)
-
-        # 2. Fetch sales over past 30 days
-        sales_query = """
-        SELECT 
-            product_id,
-            SUM(quantity) as units_sold_30d,
-            COUNT(DISTINCT invoice_no) as order_count_30d
-        FROM sales
-        WHERE DATE(sale_timestamp) >= DATE('2026-10-03', '-30 days')
-        GROUP BY product_id;
-        """
-        sales_df = pd.read_sql_query(sales_query, conn)
-
-        # 3. Fetch active/upcoming seasonal events
-        cal_query = "SELECT * FROM seasonal_calendar;"
-        cal_df = pd.read_sql_query(cal_query, conn)
+        df = pd.read_sql_query(
+            """
+            SELECT p.id as product_id, p.sku, p.brand, p.sub_brand, p.shade_name, p.hex_code,
+                   p.category, p.finish, p.pack_size_litres, p.cost_price, p.selling_price,
+                   i.current_stock, i.on_order, i.min_threshold,
+                   s.id as supplier_id, s.name as supplier_name, s.lead_time_days, s.moq_units
+            FROM products p
+            JOIN inventory i ON p.id = i.product_id
+            LEFT JOIN suppliers s ON p.supplier_id = s.id;
+            """,
+            conn,
+        )
+        sales_df = pd.read_sql_query(
+            """
+            SELECT product_id, SUM(quantity) as units_sold_30d, COUNT(DISTINCT invoice_no) as order_count_30d
+            FROM sales
+            WHERE DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?)
+            GROUP BY product_id;
+            """,
+            conn,
+            params=(ref.strftime("%Y-%m-%d"), f"-{LOOKBACK_DAYS} days", ref.strftime("%Y-%m-%d")),
+        )
+        cal = _load_calendar(conn)
 
     df = df.merge(sales_df, on="product_id", how="left").fillna({"units_sold_30d": 0, "order_count_30d": 0})
 
-    # Baseline daily velocity
-    df["daily_velocity"] = df["units_sold_30d"] / 30.0
+    past_days = [ref - timedelta(days=i) for i in range(LOOKBACK_DAYS)]
+    future_days = [ref + timedelta(days=i) for i in range(1, max(forecast_days, 30) + 1)]
 
-    # Determine seasonal multiplier based on current date (Diwali season active in Oct-Nov)
-    today = datetime(2026, 10, 3)
-    
-    def get_seasonal_multiplier(category):
-        mult = 1.0
-        for _, event in cal_df.iterrows():
-            start = datetime.strptime(event["start_date"], "%Y-%m-%d")
-            end = datetime.strptime(event["end_date"], "%Y-%m-%d")
-            # If within 15 days before start or during event
-            if (start - timedelta(days=15)) <= today <= end:
-                if "Interior" in category and ("Interior" in event["impact_category"] or "Emulsion" in event["impact_category"]):
-                    mult = max(mult, event["expected_multiplier"])
-                elif "Exterior" in category and "Exterior" in event["impact_category"]:
-                    mult = max(mult, event["expected_multiplier"])
-                elif "Waterproofing" in category and "Waterproofing" in event["impact_category"]:
-                    mult = max(mult, event["expected_multiplier"])
-        return mult
+    # Multipliers only depend on (category, finish) — compute once per pair.
+    cache: Dict[tuple, Dict[str, List[float]]] = {}
+    for key in df[["category", "finish"]].drop_duplicates().itertuples(index=False):
+        cache[(key.category, key.finish)] = {
+            "past": _multiplier_series(cal, key.category, key.finish, past_days),
+            "future": _multiplier_series(cal, key.category, key.finish, future_days),
+        }
 
-    df["seasonal_multiplier"] = df["category"].apply(get_seasonal_multiplier)
-    df["effective_velocity"] = df["daily_velocity"] * df["seasonal_multiplier"]
+    rows = []
+    for r in df.itertuples(index=False):
+        m = cache[(r.category, r.finish)]
+        normal_rate = r.units_sold_30d / sum(m["past"])            # season-neutral cans/day
+        demand = [normal_rate * x for x in m["future"]]
+        f7, f30 = sum(demand[:7]), sum(demand[:30])
 
-    # Forecast demand
-    df["forecast_7d"] = (df["effective_velocity"] * 7).apply(math.ceil)
-    df["forecast_30d"] = (df["effective_velocity"] * 30).apply(math.ceil)
+        # Days until the shelf is empty, walking forward with the daily demand
+        stock, days_left = float(r.current_stock), None
+        for i, dmd in enumerate(demand):
+            stock -= dmd
+            if stock <= 0:
+                days_left = i + (1 + stock / dmd if dmd else 1)
+                break
+        if days_left is None:
+            days_left = len(demand) + (stock / max(demand[-1], 0.01))
 
-    # Days to stockout
-    df["days_to_stockout"] = df.apply(
-        lambda r: round(r["current_stock"] / max(r["effective_velocity"], 0.05), 1),
-        axis=1
-    )
+        lead = int(r.lead_time_days or 7)
+        moq = int(r.moq_units or 10)
+        safety = math.ceil(max(demand[:SAFETY_DAYS] or [0]) * SAFETY_DAYS)
+        net_needed = math.ceil(f30) + safety - (r.current_stock + r.on_order)
 
-    # Reorder calculation incorporating supplier lead time & MOQ
-    def calculate_reorder(r):
-        lead_time = r["lead_time_days"] or 7
-        moq = r["moq_units"] or 10
-        safety_stock = math.ceil(r["effective_velocity"] * 5)  # 5 days safety buffer
-        
-        # Gross requirement = 30-day forecast + safety stock - current stock - on_order
-        net_needed = r["forecast_30d"] + safety_stock - (r["current_stock"] + r["on_order"])
-        
         if net_needed <= 0:
-            return 0, "SUFFICIENT_STOCK", "N/A"
-        
-        # Enforce MOQ
-        order_qty = math.ceil(net_needed / moq) * moq
-        
-        # Urgency based on days to stockout vs supplier lead time
-        days_left = r["days_to_stockout"]
-        if days_left <= lead_time:
-            urgency = "CRITICAL_ORDER_NOW"
-            order_date = "TODAY (URGENT)"
-        elif days_left <= (lead_time + 4):
-            urgency = "ORDER_SOON"
-            order_date = f"Within {int(days_left - lead_time)} days"
+            qty = 0
+            urgency = "ON_ORDER" if r.on_order > 0 and days_left <= lead else "SUFFICIENT_STOCK"
+            when = "Already ordered" if urgency == "ON_ORDER" else "Not needed"
         else:
-            urgency = "PLANNED"
-            order_date = f"In {int(days_left - lead_time)} days"
+            qty = math.ceil(net_needed / moq) * moq
+            if days_left <= lead:
+                urgency, when = "CRITICAL_ORDER_NOW", "Order today"
+            elif days_left <= lead + 4:
+                n = max(1, int(days_left - lead))
+                urgency, when = "ORDER_SOON", f"Order within {n} day{'s' if n != 1 else ''}"
+            else:
+                n = int(days_left - lead)
+                urgency, when = "PLANNED", f"Order in about {n} days"
 
-        return order_qty, urgency, order_date
+        rows.append({
+            "daily_velocity": round(r.units_sold_30d / LOOKBACK_DAYS, 2),
+            "normal_daily_rate": round(normal_rate, 3),
+            "seasonal_multiplier": round(max(m["future"][:7]), 2),
+            "effective_velocity": round(f7 / 7, 2),
+            "forecast_7d": math.ceil(f7),
+            "forecast_30d": math.ceil(f30),
+            "days_to_stockout": round(days_left, 1),
+            "safety_stock": safety,
+            "suggested_reorder_qty": qty,
+            "reorder_urgency": urgency,
+            "suggested_order_date": when,
+        })
 
-    results = [calculate_reorder(row) for _, row in df.iterrows()]
-    df["suggested_reorder_qty"] = [res[0] for res in results]
-    df["reorder_urgency"] = [res[1] for res in results]
-    df["suggested_order_date"] = [res[2] for res in results]
-    df["estimated_order_cost"] = df["suggested_reorder_qty"] * df["cost_price"]
-
-    return df.sort_values(by=["reorder_urgency", "days_to_stockout"], ascending=[True, True])
+    out = pd.concat([df.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
+    out["estimated_order_cost"] = out["suggested_reorder_qty"] * out["cost_price"]
+    out["_rank"] = out["reorder_urgency"].map(URGENCY_ORDER)
+    return out.sort_values(["_rank", "days_to_stockout"]).drop(columns="_rank").reset_index(drop=True)
 
 
 def evaluate_supplier_clearance_deal(
     product_id: int,
     offered_unit_cost: float,
     lot_quantity: int,
-    shelf_life_months: int = 12
+    shelf_life_months: int = 12,
+    on_day: Optional[date] = None,
 ) -> Dict[str, Any]:
     """
-    Evaluates whether a paint shop should purchase a discounted supplier clearance lot.
-    Balances:
-    - Clearance Margin vs Standard Margin
-    - Forward Demand (will it sell before expiring?)
-    - Working Capital & Holding Costs
-    - Expiry Risk
+    Should the shop buy a discounted lot? Balances discount, how long the lot
+    (plus current stock) takes to sell, money tied up, and expiry risk.
     """
+    ref = on_day or clock.today()
     with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-        SELECT p.*, i.current_stock
-        FROM products p
-        JOIN inventory i ON p.id = i.product_id
-        WHERE p.id = ?;
-        """, (product_id,))
-        row = cursor.fetchone()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT p.*, i.current_stock FROM products p JOIN inventory i ON p.id = i.product_id WHERE p.id = ?;",
+            (product_id,),
+        )
+        row = cur.fetchone()
         if not row:
             return {"error": "Product not found"}
-        
-        col_names = [d[0] for d in cursor.description]
-        prod = dict(zip(col_names, row))
+        prod = dict(zip([d[0] for d in cur.description], row))
+        units_30d = cur.execute(
+            """
+            SELECT COALESCE(SUM(quantity), 0) FROM sales
+            WHERE product_id = ? AND DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?);
+            """,
+            (product_id, ref.strftime("%Y-%m-%d"), f"-{LOOKBACK_DAYS} days", ref.strftime("%Y-%m-%d")),
+        ).fetchone()[0]
+        cal = _load_calendar(conn)
 
-        # 30-day velocity
-        cursor.execute("""
-        SELECT COALESCE(SUM(quantity), 0) / 30.0 
-        FROM sales 
-        WHERE product_id = ? AND DATE(sale_timestamp) >= DATE('2026-10-03', '-30 days');
-        """, (product_id,))
-        daily_velocity = cursor.fetchone()[0] or 0.2
+    past = _multiplier_series(cal, prod["category"], prod["finish"], [ref - timedelta(days=i) for i in range(LOOKBACK_DAYS)])
+    normal_rate = max(units_30d / sum(past), 0.05)  # cans per normal day
 
     regular_cost = prod["cost_price"]
     selling_price = prod["selling_price"]
-    discount_pct = round(((regular_cost - offered_unit_cost) / regular_cost) * 100, 1)
+    discount_pct = round((regular_cost - offered_unit_cost) / regular_cost * 100, 1)
 
-    # Expected months to sell the lot + existing stock
-    total_stock_to_sell = prod["current_stock"] + lot_quantity
-    days_to_sell_all = total_stock_to_sell / max(daily_velocity, 0.05)
-    months_to_sell_all = round(days_to_sell_all / 30.0, 1)
+    total_to_sell = prod["current_stock"] + lot_quantity
+    months_to_sell = round(total_to_sell / normal_rate / 30.0, 1)
 
-    # Financial analysis
     total_investment = round(offered_unit_cost * lot_quantity, 2)
     expected_revenue = round(selling_price * lot_quantity, 2)
     gross_profit = round(expected_revenue - total_investment, 2)
-    profit_margin_pct = round((gross_profit / expected_revenue) * 100, 1)
+    profit_margin_pct = round(gross_profit / expected_revenue * 100, 1) if expected_revenue else 0.0
+    holding_cost = round(total_investment * 0.12 * (months_to_sell / 12.0), 2)   # 12% a year
+    net_profit = round(gross_profit - holding_cost, 2)
 
-    # Annual holding cost estimated at 12% of inventory capital
-    estimated_holding_cost = round(total_investment * 0.12 * (months_to_sell_all / 12.0), 2)
-    net_projected_profit = round(gross_profit - estimated_holding_cost, 2)
-
-    # Risk assessment
-    if months_to_sell_all > shelf_life_months:
-        recommendation = "REJECT / HIGH EXPIRY RISK"
-        verdict = f"High Risk: It will take ~{months_to_sell_all} months to sell, which exceeds the remaining {shelf_life_months}-month shelf-life."
-        action = "Do not purchase this batch; stock will expire before depletion."
-        badge = "critical"
-    elif months_to_sell_all > (shelf_life_months * 0.75):
-        recommendation = "BUY WITH CLEARANCE PROMOTION"
-        verdict = f"Moderate Risk: Stock turnover (~{months_to_sell_all} months) is tight against {shelf_life_months}-month expiry."
-        action = "Negotiate an extra 10% discount and plan a 15% customer promotional bundle to accelerate sales."
-        badge = "warning"
+    if offered_unit_cost >= regular_cost:
+        recommendation, badge = "NO DISCOUNT", "warning"
+        verdict = "This price is not below your usual supplier cost."
+        action = "Ask for at least 10% off before considering it."
+    elif months_to_sell > shelf_life_months:
+        recommendation, badge = "SKIP — WILL EXPIRE FIRST", "critical"
+        verdict = f"At today's pace it takes about {months_to_sell} months to sell, but it expires in {shelf_life_months}."
+        action = "Don't buy this lot, or buy fewer cans."
+    elif months_to_sell > shelf_life_months * 0.75:
+        recommendation, badge = "BUY, BUT PLAN AN OFFER", "warning"
+        verdict = f"It sells in about {months_to_sell} months — close to the {shelf_life_months}-month expiry."
+        action = "Negotiate another 10% off and plan a customer offer to move it faster."
     else:
-        recommendation = "STRONG BUY (EXCELLENT ROI)"
-        verdict = f"Safe Deal: High {discount_pct}% discount on standard cost. Projected turnover is ~{months_to_sell_all} months (well within {shelf_life_months}m shelf life)."
-        action = f"Proceed with purchase of {lot_quantity} units. Estimated net profit: Rs. {net_projected_profit:,.2f}."
-        badge = "success"
+        recommendation, badge = "GOOD DEAL — BUY IT", "success"
+        verdict = f"{discount_pct}% below usual cost, and it sells in about {months_to_sell} months — well before the {shelf_life_months}-month expiry."
+        action = f"Buy {lot_quantity} cans. Expected profit after holding cost: ₹{net_profit:,.0f}."
 
     return {
-        "sku": prod["sku"],
-        "shade_name": prod["shade_name"],
-        "brand": prod["brand"],
-        "pack_size": f"{prod['pack_size_litres']}L",
-        "regular_cost": regular_cost,
-        "offered_cost": offered_unit_cost,
-        "discount_pct": discount_pct,
-        "lot_quantity": lot_quantity,
-        "total_investment": total_investment,
-        "gross_profit": gross_profit,
-        "profit_margin_pct": profit_margin_pct,
-        "months_to_sell": months_to_sell_all,
-        "shelf_life_months": shelf_life_months,
-        "net_projected_profit": net_projected_profit,
-        "recommendation": recommendation,
-        "verdict": verdict,
-        "action": action,
-        "badge": badge
+        "sku": prod["sku"], "shade_name": prod["shade_name"], "brand": prod["brand"],
+        "pack_size": f"{prod['pack_size_litres']:g}L", "regular_cost": regular_cost,
+        "offered_cost": offered_unit_cost, "discount_pct": discount_pct, "lot_quantity": lot_quantity,
+        "total_investment": total_investment, "gross_profit": gross_profit,
+        "profit_margin_pct": profit_margin_pct, "months_to_sell": months_to_sell,
+        "shelf_life_months": shelf_life_months, "holding_cost": holding_cost,
+        "net_projected_profit": net_profit, "recommendation": recommendation,
+        "verdict": verdict, "action": action, "badge": badge,
     }
