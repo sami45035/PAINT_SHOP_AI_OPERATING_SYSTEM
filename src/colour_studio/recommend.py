@@ -195,8 +195,11 @@ def score_shade(shade: Dict[str, Any], palette: List[Dict[str, Any]], wall: Opti
             s, txt = 0.3, f"stands out against the {item['name']}"
         else:
             gap = hue_gap(H, aH)
-            if gap < 35:
+            same_word = colour_word((L, C, H)) == colour_word(item["lch"])
+            if gap < 35 and same_word:
                 s, txt = 0.55, f"same colour family as the {item['name']}"
+            elif gap < 35:
+                s, txt = 0.4, f"a close, harmonious tone next to the {item['name']}"
             elif 140 <= gap <= 220:
                 s, txt = 0.75, f"contrasts beautifully with the {item['name']}"
             elif 90 <= gap < 140:

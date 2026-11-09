@@ -26,7 +26,9 @@ from src.config import (
     COLOUR_WORKING_MAX_SIDE,
     MODELS_DIR,
     WALL_MODEL_FILES,
+    WALL_MODEL_FLIP_PASS,
     WALL_MODEL_INPUT_SIZE,
+    WALL_MODEL_MAX_LONG_SIDE,
     WALL_MODEL_PATH,
     WALL_MODEL_REPO,
 )
@@ -193,37 +195,56 @@ def _ceiling_kinks(wall_bin: np.ndarray) -> List[int]:
     Wall corners from the shape of the wall area: the line where walls meet the
     ceiling changes direction at every corner (flat on the back wall, sloping on
     the side walls in a photo). Returns x positions of those bends.
+
+    Each candidate bend is confirmed by fitting a straight line on both sides
+    (robustly, so a lamp-glow bite in part of the outline doesn't spoil it).
     """
+    from src.colour_studio.refine import _fit_line
+
     h, w = wall_bin.shape
     has = wall_bin.any(axis=0)
     if has.sum() < w * 0.5:
         return []
-    top = np.where(has, wall_bin.argmax(axis=0), -1).astype(np.float32)
-    valid = top >= 0
+    raw_top = np.where(has, wall_bin.argmax(axis=0), -1)
+    valid = raw_top >= 0
     xs = np.arange(w)
-    top = np.interp(xs, xs[valid], top[valid]).astype(np.float32)
+    top = np.interp(xs, xs[valid], raw_top[valid]).astype(np.float32)
     if w >= 15:  # running median smooths out small bumps in the outline
         padded = np.pad(top, 7, mode="edge")
         top = np.median(np.lib.stride_tricks.sliding_window_view(padded, 15), axis=1).astype(np.float32)
     k = max(6, w // 30)
-    out: List[int] = []
-    scores = np.zeros(w, np.float32)
-    for x in range(k, w - k):
-        seg_l, seg_r = top[x - k:x + 1], top[x:x + k + 1]
-        # Skip places where the outline jumps (a wardrobe or curtain reaching the ceiling)
-        if np.abs(np.diff(seg_l)).max() > 6 or np.abs(np.diff(seg_r)).max() > 6:
-            continue
-        slope_l = (top[x] - top[x - k]) / k
-        slope_r = (top[x + k] - top[x]) / k
-        scores[x] = abs(slope_r - slope_l)
+    kl = max(k, w // 12)
+    d = np.zeros(w, np.float32)
+    d[k:w - k] = np.abs((top[2 * k:] - top[k:w - k]) / k - (top[k:w - k] - top[:w - 2 * k]) / k)
+
     margin = int(0.04 * w)
-    while True:
-        x = int(scores.argmax())
-        if scores[x] < 0.2:
+    out: List[int] = []
+    tried = 0
+    while tried < 10:
+        x = int(d.argmax())
+        if d[x] < 0.2:
             break
-        if margin <= x <= w - margin:
+        d[max(0, x - 2 * k):x + 2 * k] = 0
+        tried += 1
+        if not (margin <= x <= w - margin):
+            continue
+        lines = []
+        for a_, b_ in ((max(0, x - kl), x), (x, min(w, x + kl + 1))):
+            sel = (raw_top[a_:b_] > 3)          # ignore columns where the wall runs off the photo
+            if sel.sum() < 0.6 * (b_ - a_):
+                break
+            xx = xs[a_:b_][sel].astype(np.float32)
+            yy = raw_top[a_:b_][sel].astype(np.float32)
+            fit = _fit_line(xx, yy, tol=2.0, iters=60)
+            if fit is None or fit[2].sum() < 0.6 * len(xx):
+                break
+            lines.append(fit[:2])
+        if len(lines) != 2:
+            continue
+        (a1, b1), (a2, b2) = lines
+        meet_gap = abs((a1 * x + b1) - (a2 * x + b2))
+        if abs(a2 - a1) >= 0.25 and meet_gap <= 8:
             out.append(x)
-        scores[max(0, x - 2 * k):x + 2 * k] = 0
     return sorted(out)
 
 
@@ -261,21 +282,59 @@ def _corner_lines(image_rgb: np.ndarray, region: Optional[np.ndarray] = None) ->
     return barrier.astype(bool)
 
 
+def _outline_slope(mask: np.ndarray, which: str = "top") -> Optional[float]:
+    """Slope (dy/dx) of a wall's top or bottom outline, from its straightest part."""
+    from src.colour_studio.refine import _fit_line
+
+    h, w = mask.shape
+    cols = np.nonzero(mask.any(axis=0))[0]
+    if len(cols) < 20:
+        return None
+    if which == "top":
+        ys = mask[:, cols].argmax(axis=0)
+        ok = ys > 2                                   # not running off the top of the photo
+    else:
+        ys = h - 1 - mask[::-1, cols].argmax(axis=0)
+        ok = ys < h - 3
+    if ok.sum() < max(15, 0.4 * len(cols)):
+        return None
+    fit = _fit_line(cols[ok].astype(np.float32), ys[ok].astype(np.float32), tol=3.0)
+    if fit is None or fit[2].sum() < 0.4 * ok.sum():
+        return None
+    return fit[0]
+
+
+def _wall_side(r: WallRegion) -> Optional[str]:
+    """
+    Which wall is this, from perspective: the ceiling line is flat on the wall
+    you face, slopes down toward the middle on a left wall and the other way
+    on a right wall (the floor line does the opposite).
+    """
+    top = _outline_slope(r.mask, "top")
+    if top is not None:
+        if abs(top) < 0.12:
+            return "Back"
+        return "Left" if top > 0 else "Right"
+    bottom = _outline_slope(r.mask, "bottom")
+    if bottom is not None:
+        if abs(bottom) < 0.12:
+            return "Back"
+        return "Left" if bottom < 0 else "Right"
+    return None
+
+
 def _name_regions(regions: List[WallRegion]) -> List[WallRegion]:
     """Give walls names a shop assistant would say: Back wall, Left wall, Right wall."""
     if not regions:
         return regions
-    by_area = sorted(regions, key=lambda r: r.area_share, reverse=True)
     names: Dict[int, str] = {}
-    central = [r for r in by_area if 0.3 <= r.centroid[0] <= 0.7]
-    if central:
-        names[central[0].id] = "Back wall"
-    for r in by_area:
-        if r.id in names:
-            continue
-        x = r.centroid[0]
-        names[r.id] = "Left wall" if x < 0.4 else ("Right wall" if x > 0.6 else "Back wall")
-    # Number duplicates: "Left wall", "Left wall 2"
+    for r in regions:
+        side = _wall_side(r)
+        if side is None:  # no clear outline: fall back to where it sits in the photo
+            x = r.centroid[0]
+            side = "Left" if x < 0.35 else ("Right" if x > 0.65 else "Back")
+        names[r.id] = f"{side} wall"
+    # Number duplicates from left to right: "Left wall", "Left wall 2"
     seen: Dict[str, int] = {}
     for r in sorted(regions, key=lambda r: r.centroid[0]):
         base = names[r.id]
@@ -321,7 +380,7 @@ def split_into_walls(image_rgb: np.ndarray, wall_bin: np.ndarray, min_share: flo
         grown = cv2.dilate(np.where(markers > 1, markers, 0).astype(np.float32), np.ones((3, 3), np.uint8)).astype(np.int32)
         markers[boundary] = grown[boundary]
 
-    regions = _merge_similar(image_rgb, markers, wall_bin, list(range(2, next_id)))
+    regions = _merge_similar(image_rgb, markers, wall_bin, list(range(2, next_id)), corners=barrier)
     out = []
     for rid, m in enumerate(regions, start=1):
         share = float(m.sum()) / total
@@ -333,7 +392,7 @@ def split_into_walls(image_rgb: np.ndarray, wall_bin: np.ndarray, min_share: flo
 
 
 def _merge_similar(image_rgb: np.ndarray, markers: np.ndarray, wall_bin: np.ndarray, ids: List[int],
-                   max_delta_e: float = 3.0) -> List[np.ndarray]:
+                   max_delta_e: float = 3.0, corners: Optional[np.ndarray] = None) -> List[np.ndarray]:
     """
     Re-join neighbouring pieces that are really one wall. Compares the colour
     right at the shared border (not the whole-piece average), so a gentle light
@@ -353,6 +412,9 @@ def _merge_similar(image_rgb: np.ndarray, markers: np.ndarray, wall_bin: np.ndar
 
     near = np.ones((9, 9), np.uint8)
     band_k = np.ones((25, 25), np.uint8)
+    corner_zone = None
+    if corners is not None and corners.any():
+        corner_zone = cv2.dilate(corners.astype(np.uint8), np.ones((11, 11), np.uint8)).astype(bool)
     keys = list(masks)
     grown = {i: cv2.dilate(masks[i].astype(np.uint8), near).astype(bool) for i in keys}
     for a_idx, a in enumerate(keys):
@@ -360,6 +422,8 @@ def _merge_similar(image_rgb: np.ndarray, markers: np.ndarray, wall_bin: np.ndar
             border = grown[a] & grown[b]
             if border.sum() < 40:
                 continue
+            if corner_zone is not None and (border & corner_zone).sum() > 0.5 * border.sum():
+                continue  # they meet at a detected corner: two walls, even if painted alike
             band = cv2.dilate(border.astype(np.uint8), band_k).astype(bool)
             pa, pb = lab[band & masks[a]], lab[band & masks[b]]
             if len(pa) < 30 or len(pb) < 30:
@@ -452,13 +516,37 @@ def _read_id2label(model_path: Path) -> Dict[int, str]:
     return dict(ADE20K_FALLBACK_LABELS)
 
 
+def _straighten_regions(regions: List[WallRegion], edges: np.ndarray, objects: np.ndarray, wall: np.ndarray):
+    """Run the straight-ceiling-line fix on each wall, then refresh its stats."""
+    from src.colour_studio.refine import straighten_top
+
+    if not regions:
+        return regions, wall
+    h, w = wall.shape
+    union = np.zeros_like(wall)
+    for r in regions:
+        others = np.zeros_like(wall)
+        for o in regions:
+            if o.id != r.id:
+                others |= o.mask
+        r.mask = straighten_top(r.mask, edges, objects, others)
+        ys, xs = np.nonzero(r.mask)
+        r.area_share = float(r.mask.mean())
+        r.centroid = (xs.mean() / w, ys.mean() / h)
+        union |= r.mask
+    return _name_regions(regions), union
+
+
 class WallSegmenter:
     """Runs SegFormer on a photo and returns walls plus a full label map."""
 
-    def __init__(self, session, id2label: Dict[int, str], input_size: int = WALL_MODEL_INPUT_SIZE):
+    def __init__(self, session, id2label: Dict[int, str], input_size: int = WALL_MODEL_INPUT_SIZE,
+                 flip_pass: bool = WALL_MODEL_FLIP_PASS):
         self.session = session
         self.id2label = id2label
         self.input_size = input_size
+        self.flip_pass = flip_pass
+        self.square_only = False            # set if the model file only accepts square input
         self.input_name = session.get_inputs()[0].name
         names = {v: k for k, v in id2label.items()}
         self.wall_ids = [names.get("wall", 0)]
@@ -473,41 +561,75 @@ class WallSegmenter:
         session = ort.InferenceSession(str(model_path), sess_options=opts, providers=["CPUExecutionProvider"])
         return cls(session, _read_id2label(model_path))
 
-    def _logits(self, image_rgb: np.ndarray) -> np.ndarray:
-        s = self.input_size
-        x = cv2.resize(image_rgb, (s, s), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+    def _input_size(self, h: int, w: int) -> Tuple[int, int]:
+        """Keep the photo's shape: short side = input_size, both sides multiples of 32."""
+        if self.square_only:
+            return self.input_size, self.input_size
+        s = self.input_size / min(h, w)
+        ih, iw = h * s, w * s
+        cap = WALL_MODEL_MAX_LONG_SIDE / max(ih, iw)
+        if cap < 1:
+            ih, iw = ih * cap, iw * cap
+        return max(32, int(round(ih / 32)) * 32), max(32, int(round(iw / 32)) * 32)
+
+    def _run(self, image_rgb: np.ndarray) -> np.ndarray:
+        ih, iw = self._input_size(*image_rgb.shape[:2])
+        x = cv2.resize(image_rgb, (iw, ih), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
         x = (x - IMAGENET_MEAN) / IMAGENET_STD
-        x = np.transpose(x, (2, 0, 1))[None].astype(np.float32)
-        out = self.session.run(None, {self.input_name: x})[0]
-        return out[0]  # (C, h, w)
+        x = np.ascontiguousarray(np.transpose(x, (2, 0, 1))[None].astype(np.float32))
+        try:
+            out = self.session.run(None, {self.input_name: x})[0]
+        except Exception:
+            if self.square_only:
+                raise
+            self.square_only = True          # older exports: fixed 512 x 512 input
+            return self._run(image_rgb)
+        return out[0]                         # (C, h/4, w/4)
+
+    @staticmethod
+    def _softmax(logits: np.ndarray) -> np.ndarray:
+        z = logits - logits.max(axis=0, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(axis=0, keepdims=True)
+
+    def _probs(self, image_rgb: np.ndarray) -> np.ndarray:
+        p = self._softmax(self._run(image_rgb))
+        if self.flip_pass:
+            q = self._softmax(self._run(np.ascontiguousarray(image_rgb[:, ::-1])))[:, :, ::-1]
+            if q.shape == p.shape:
+                p = (p + q) / 2.0
+        return p
+
+    def _logits(self, image_rgb: np.ndarray) -> np.ndarray:  # kept for older callers
+        return self._run(image_rgb)
 
     def segment(self, image_rgb: np.ndarray) -> SegmentationResult:
         import time
 
+        from src.colour_studio.refine import feather, refine_wall
+
         t0 = time.perf_counter()
         img = to_working_size(image_rgb)
         H, W = img.shape[:2]
-        logits = self._logits(img)                       # (C, h, w) — h, w are 1/4 of the input
-        C = logits.shape[0]
+        probs = self._probs(img)                        # (C, h, w) at 1/4 of the model input
+        C = probs.shape[0]
 
         wall_ids = list(self.wall_ids)
-        labels_low = logits.argmax(axis=0)
+        labels_low = probs.argmax(axis=0)
         share = lambda ids: float(np.isin(labels_low, ids).mean())
         if share(wall_ids) < 0.03 and self.exterior_ids and share(self.exterior_ids) > 0.10:
             wall_ids = wall_ids + self.exterior_ids     # outside photo: paint the building facade
 
-        # Wall-vs-rest margin, upsampled as ONE channel (cheap) for smooth edges
-        others = np.delete(logits, wall_ids, axis=0).max(axis=0)
-        wall_logit = logits[wall_ids].max(axis=0)
-        margin = cv2.resize((wall_logit - others).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
-        soft = 1.0 / (1.0 + np.exp(-margin * 1.5))
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        soft = np.clip(guided_filter(gray, soft, radius=max(4, W // 120), eps=1e-3), 0.0, 1.0).astype(np.float32)
+        p_wall = cv2.resize(probs[wall_ids].sum(axis=0).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
+        conf = cv2.resize(probs.max(axis=0).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
+        label_map = cv2.resize(labels_low.astype(np.uint8 if C <= 255 else np.uint16), (W, H),
+                               interpolation=cv2.INTER_NEAREST).astype(np.int32)
 
-        label_map = cv2.resize(labels_low.astype(np.uint8 if C <= 255 else np.uint16), (W, H), interpolation=cv2.INTER_NEAREST)
-        regions = split_into_walls(img, soft > 0.5)
+        wall, edges, objects = refine_wall(img, p_wall, label_map, conf, self.id2label, return_parts=True)
+        regions = split_into_walls(img, wall)
+        regions, wall = _straighten_regions(regions, edges, objects, wall)
         return SegmentationResult(
-            image=img, wall_soft=soft, regions=regions, label_map=label_map.astype(np.int32),
+            image=img, wall_soft=feather(wall, img), regions=regions, label_map=label_map,
             id2label=self.id2label, method="model", seconds=time.perf_counter() - t0,
         )
 
@@ -527,6 +649,17 @@ def region_from_tap(image_rgb: np.ndarray, x: float, y: float, tolerance: float 
     smooth = cv2.bilateralFilter(image_rgb, 9, 30, 9)
     lab = cv2.cvtColor(smooth, cv2.COLOR_RGB2LAB)
     barrier = _edge_barrier(image_rgb) | _corner_lines(image_rgb)
+    # Blown-out / near-white glare (lamp hotspots, a white ceiling in glare) has no
+    # usable colour: a flood through it can bridge from a wall onto the ceiling.
+    blown = (image_rgb.min(axis=2) >= 240) & ((image_rgb.max(axis=2).astype(np.int16) - image_rgb.min(axis=2)) < 14)
+    if blown[py, px]:   # tapped a hotspot: start from the nearest pixel that has colour
+        win = 60
+        y0, x0 = max(0, py - win), max(0, px - win)
+        cand = np.argwhere(~blown[y0:py + win + 1, x0:px + win + 1])
+        if len(cand):
+            d = (cand[:, 0] + y0 - py) ** 2 + (cand[:, 1] + x0 - px) ** 2
+            py, px = int(cand[d.argmin(), 0] + y0), int(cand[d.argmin(), 1] + x0)
+    barrier = barrier | blown
     flood_mask = np.zeros((h + 2, w + 2), np.uint8)
     flood_mask[1:-1, 1:-1][barrier] = 1     # floodFill never crosses non-zero mask pixels
     if barrier[py, px]:                      # tapped right on an edge — nudge to a nearby flat pixel
@@ -538,6 +671,16 @@ def region_from_tap(image_rgb: np.ndarray, x: float, y: float, tolerance: float 
     cv2.floodFill(lab, flood_mask, (px, py), (0, 0, 0), tol, tol, flags)
     region = flood_mask[1:-1, 1:-1] == 255
     region = cv2.morphologyEx(region.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8)).astype(bool)
+    # Blown-out spots fully inside the wall (a hotspot in the middle) belong to it
+    inv = (~region).astype(np.uint8)
+    n_h, hole_ids, hstats, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+    for i in range(1, n_h):
+        hx, hy, hw, hh, area = hstats[i]
+        if hx == 0 or hy == 0 or hx + hw >= w or hy + hh >= h or area > 0.03 * h * w:
+            continue
+        hole = hole_ids[hy:hy + hh, hx:hx + hw] == i
+        if blown[hy:hy + hh, hx:hx + hw][hole].mean() > 0.5:
+            region[hy:hy + hh, hx:hx + hw][hole] = True
     # If the fill leaked round a faint corner, cut at the corner and keep the tapped side
     cut = np.zeros((h, w), np.uint8)
     for kx in _ceiling_kinks(region):
@@ -560,7 +703,22 @@ def tap_result(image_rgb: np.ndarray, taps: List[Tuple[float, float]]) -> Segmen
     regions: List[WallRegion] = []
     union = np.zeros((h, w), dtype=bool)
     for i, (x, y) in enumerate(taps, start=1):
-        m = region_from_tap(img, x, y) & ~union
+        if union[int(np.clip(y * h, 0, h - 1)), int(np.clip(x * w, 0, w - 1))]:
+            continue  # this wall is already picked
+        # Start strict: a smooth light gradient still passes (neighbour-to-neighbour
+        # changes are tiny) but a faint corner between two walls doesn't. Loosen
+        # only if that gives too small a wall (rough or noisy paint).
+        m, fallback = None, None
+        for tol in (2.5, 4.0, 6.0, 9.0):
+            cand = region_from_tap(img, x, y, tolerance=tol) & ~union
+            share = cand.mean()
+            if share <= 0.4:
+                fallback = cand
+            if 0.03 <= share <= 0.4:
+                m = cand
+                break
+        if m is None:
+            m = fallback if fallback is not None else cand
         if m.sum() < 50:
             continue
         union |= m
@@ -570,3 +728,83 @@ def tap_result(image_rgb: np.ndarray, taps: List[Tuple[float, float]]) -> Segmen
     soft = cv2.GaussianBlur(union.astype(np.float32), (0, 0), 1.2)
     regions = _name_regions(regions)
     return SegmentationResult(image=img, wall_soft=soft, regions=regions, method="tap")
+
+
+# --------------------------------------------------------------------------------
+# Manual fixes: "add a missed spot" / "remove a spot"
+# --------------------------------------------------------------------------------
+
+def spot_from_tap(image_rgb: np.ndarray, x: float, y: float, max_share: float = 0.04) -> np.ndarray:
+    """
+    The patch under a tap, grown from the point and stopping at edges. A spot
+    is a patch, not a whole wall: if the growth spreads too far (a faint edge
+    let it through), it is retried with stricter colour matching, and as a
+    last resort a small round brush is used.
+    """
+    h, w = image_rgb.shape[:2]
+    limit = max_share * h * w
+    for tol in (7.0, 4.0, 2.5, 1.5):
+        m = region_from_tap(image_rgb, x, y, tolerance=tol)
+        if 10 <= m.sum() <= limit:
+            return m
+    yy, xx = np.ogrid[:h, :w]
+    r = 0.03 * float(np.hypot(h, w))
+    return (xx - x * w) ** 2 + (yy - y * h) ** 2 <= r * r
+
+
+def apply_fixes(result: SegmentationResult, fixes: List[Tuple[str, float, float]],
+                selected: Optional[List[int]] = None) -> SegmentationResult:
+    """
+    Apply the customer's manual fixes on top of the automatic walls.
+    fixes: [("add" | "remove", x, y)] with x, y normalised. Returns a new result.
+    """
+    import copy
+
+    from src.colour_studio.refine import feather
+
+    if not fixes:
+        return result
+    out = copy.copy(result)
+    out.regions = [copy.copy(r) for r in result.regions]
+    for r in out.regions:
+        r.mask = r.mask.copy()
+    h, w = result.wall_soft.shape
+    for op, x, y in fixes:
+        spot = spot_from_tap(result.image, x, y)
+        if spot.sum() < 10:
+            continue
+        if op == "remove":
+            for r in out.regions:
+                r.mask &= ~spot
+            continue
+        # add: give the spot to the nearest selected wall (or nearest wall at all)
+        px, py = int(np.clip(x * w, 0, w - 1)), int(np.clip(y * h, 0, h - 1))
+        pool = [r for r in out.regions if not selected or r.id in selected] or out.regions
+        if not pool:
+            new_id = 1 + max([r.id for r in out.regions], default=0)
+            out.regions.append(WallRegion(id=new_id, name="Wall", mask=spot.copy(), area_share=0.0, centroid=(x, y)))
+            continue
+        best, best_d = pool[0], float("inf")
+        for r in pool:
+            dist = cv2.distanceTransform((~r.mask).astype(np.uint8), cv2.DIST_L2, 3)
+            d = float(dist[py, px])
+            if d < best_d:
+                best, best_d = r, d
+        others = np.zeros((h, w), bool)
+        for r in out.regions:
+            if r.id != best.id:
+                others |= r.mask
+        best.mask |= spot & ~others
+    union = np.zeros((h, w), bool)
+    kept = []
+    for r in out.regions:
+        if r.mask.sum() < 50:
+            continue
+        ys, xs = np.nonzero(r.mask)
+        r.area_share = float(r.mask.mean())
+        r.centroid = (xs.mean() / w, ys.mean() / h)
+        union |= r.mask
+        kept.append(r)
+    out.regions = kept
+    out.wall_soft = feather(union, result.image)
+    return out

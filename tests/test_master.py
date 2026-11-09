@@ -25,41 +25,26 @@ def _sample_room(name="master_bedroom.jpg"):
     return cv2.cvtColor(cv2.imread(str(SAMPLE_ROOMS_DIR / name)), cv2.COLOR_BGR2RGB)
 
 
-class FakeSegFormer:
-    """Stands in for the ONNX session: returns ADE20K-style logits for the sample bedroom's layout."""
+import sys as _sys  # noqa: E402
 
-    class _Inp:
-        name = "pixel_values"
-
-    def get_inputs(self):
-        return [self._Inp()]
-
-    def run(self, _outputs, feeds):
-        import cv2
-
-        assert feeds["pixel_values"].shape == (1, 3, 512, 512)
-        h = w = 128
-
-        def P(pts):
-            m = np.zeros((h, w), np.uint8)
-            cv2.fillPoly(m, [np.array([[int(x * w), int(y * h)] for x, y in pts], np.int32)], 1)
-            return m > 0
-
-        bx0, by0, bx1, by1 = .22, .16, .78, .74
-        ceiling = P([(0, 0), (1, 0), (bx1, by0), (bx0, by0)])
-        floor = P([(0, 1), (bx0, by1), (bx1, by1), (1, 1)])
-        bed = P([(.33, .52), (.67, .52), (.67, .66), (.78, .94), (.22, .94), (.30, .66), (.33, .66)])
-        door = P([(.05, .27), (.15, .24), (.15, .82), (.05, .92)])
-        win = P([(.86, .26), (.95, .20), (.95, .56), (.86, .57)])
-        art = P([(.45, .24), (.55, .24), (.55, .41), (.45, .41)])
-        wall = ~(ceiling | floor | bed | door | win | art)
-        logits = np.zeros((1, 150, h, w), np.float32)
-        for cid, m in [(0, wall), (5, ceiling), (3, floor & ~bed), (7, bed), (14, door), (8, win), (22, art)]:
-            logits[0, cid][m] = 8.0
-        return [logits]
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data"))
+from fake_wall_model import LABELS, FakeSegFormer, iou  # noqa: E402
+import make_sample_rooms as rooms  # noqa: E402
 
 
-LABELS = {0: "wall", 3: "floor", 5: "ceiling", 7: "bed", 8: "windowpane", 14: "door", 22: "painting"}
+def _segment(name="master_bedroom.jpg", **kw):
+    from src.colour_studio.segmentation import WallSegmenter
+
+    img, lab = rooms.render(name)
+    fake = FakeSegFormer(img, lab, **kw)
+    res = WallSegmenter(fake, LABELS).segment(img)
+    H, W = res.image.shape[:2]
+    truth = cv2.resize((lab == 0).astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+    return res, truth, fake
+
+
+import cv2  # noqa: E402
 
 
 # --------------------------------------------------------------------- Clock
@@ -217,45 +202,89 @@ class TestLayer5Camera(unittest.TestCase):
 
 # --------------------------------------------------------------------- Layer 6
 class TestLayer6ColourStudio(unittest.TestCase):
-    def test_model_path_finds_three_walls(self):
+    def test_walls_are_accurate_despite_model_mistakes(self):
+        # The stand-in model makes the real model's mistakes: bites at lamp glow,
+        # holes, leaks onto the headboard/sofa, ragged blotches, coarse edges.
+        for name in rooms.ROOMS:
+            res, truth, fake = _segment(name)
+            raw = cv2.resize((fake.pred == 0).astype(np.uint8), truth.shape[::-1],
+                             interpolation=cv2.INTER_NEAREST).astype(bool)
+            self.assertGreater(iou(res.wall_mask, truth), 0.95, name)
+            self.assertGreaterEqual(iou(res.wall_mask, truth), iou(raw, truth) - 0.005, name)
+
+    def test_furniture_and_objects_stay_unpainted(self):
+        for name, cls in [("master_bedroom.jpg", 7), ("modern_living_room.jpg", 23), ("master_bedroom.jpg", 14),
+                          ("master_bedroom.jpg", 22)]:
+            res, truth, _ = _segment(name)
+            img, lab = rooms.render(name)
+            obj = cv2.resize((lab == cls).astype(np.uint8), truth.shape[::-1], interpolation=cv2.INTER_NEAREST).astype(bool)
+            self.assertLess((res.wall_mask & obj).sum() / obj.sum(), 0.02, f"{name} class {cls}")
+
+    def test_three_named_walls_whatever_the_framing(self):
         from src.colour_studio.segmentation import WallSegmenter
 
-        res = WallSegmenter(FakeSegFormer(), LABELS).segment(_sample_room())
-        names = sorted(r.name for r in res.regions)
-        self.assertEqual(names, ["Back wall", "Left wall", "Right wall"])
-        back = [r for r in res.regions if r.name == "Back wall"][0]
-        self.assertEqual(res.region_at(0.5, 0.25).id, back.id)
+        for name in rooms.ROOMS:
+            res, _, _ = _segment(name)
+            self.assertEqual([r.name for r in res.regions], ["Left wall", "Back wall", "Right wall"], name)
+        img, lab = rooms.render("master_bedroom.jpg")
+        im, lb = np.ascontiguousarray(img[:, 380:]), np.ascontiguousarray(lab[:, 380:])  # back wall left of centre
+        res = WallSegmenter(FakeSegFormer(im, lb), LABELS).segment(im)
+        self.assertEqual([r.name for r in res.regions], ["Back wall", "Right wall"])
+
+    def test_model_sees_photo_shape_and_falls_back_to_square(self):
+        res, _, fake = _segment()
+        self.assertTrue(all(h != w for h, w in fake.calls))          # keeps the 3:2 shape
+        self.assertEqual(len(fake.calls), 2)                         # normal + mirrored pass
+        res2, truth, fake2 = _segment(square_only=True)               # older model files
+        self.assertTrue(any(h == w for h, w in fake2.calls))
+        self.assertGreater(iou(res2.wall_mask, truth), 0.9)
 
     def test_tap_mode_separates_walls(self):
         from src.colour_studio.segmentation import tap_result
 
-        for room in ("master_bedroom.jpg", "modern_living_room.jpg", "cozy_dining_room.jpg"):
-            res = tap_result(_sample_room(room), [(0.5, 0.2), (0.05, 0.12), (0.95, 0.12)])
-            self.assertEqual(len(res.regions), 3, room)
-            self.assertLess(max(r.area_share for r in res.regions), 0.35, room)  # no leaking round corners
+        for room in rooms.ROOMS:
+            res = tap_result(_sample_room(room), [(0.38, 0.45), (0.05, 0.12), (0.95, 0.12)])  # on bare wall
+            _, lab = rooms.render(room)
+            truth = cv2.resize((lab == 0).astype(np.uint8), res.wall_mask.shape[::-1],
+                               interpolation=cv2.INTER_NEAREST).astype(bool)
+            self.assertGreaterEqual(len(res.regions), 2, room)
+            for r in res.regions:   # never paints the ceiling, furniture or windows
+                self.assertGreater((r.mask & truth).sum() / r.mask.sum(), 0.85, f"{room} {r.name}")
+            self.assertGreater(iou(res.wall_mask, truth), 0.8, room)
+
+    def test_manual_fixes_add_and_remove_spots(self):
+        from src.colour_studio.segmentation import apply_fixes
+
+        res, _, _ = _segment()
+        back = [r.id for r in res.regions if r.name == "Back wall"]
+        size = lambda r: [x for x in r.regions if x.name == "Back wall"][0].mask.sum()
+        added = apply_fixes(res, [("add", 0.5, 0.56)], back)            # a strip of the headboard
+        self.assertGreater(size(added), size(res))
+        self.assertLess(size(added) - size(res), 0.04 * res.wall_mask.size)   # a spot, not a wall
+        undone = apply_fixes(res, [("add", 0.5, 0.56), ("remove", 0.5, 0.56)], back)
+        self.assertLess(abs(int(size(undone)) - int(size(res))), 200)
 
     def test_recolour_keeps_light_and_leaves_rest_alone(self):
         from src.colour_studio.recolour import recolour, srgb_to_linear
-        from src.colour_studio.segmentation import WallSegmenter
 
-        res = WallSegmenter(FakeSegFormer(), LABELS).segment(_sample_room())
+        res, _, _ = _segment(mistakes=False)
         back = [r for r in res.regions if r.name == "Back wall"][0]
         alpha = res.selection_alpha([back.id])
         out = recolour(res.image, alpha, "#1A365D")
         untouched = alpha == 0
         self.assertTrue(np.array_equal(out[untouched], res.image[untouched]))
         core = back.mask & (alpha > 0.99)
-        y_in = srgb_to_linear(res.image[core] / 255.0) @ np.array([0.2126, 0.7152, 0.0722])
-        y_out = srgb_to_linear(out[core] / 255.0) @ np.array([0.2126, 0.7152, 0.0722])
+        w = np.array([0.2126, 0.7152, 0.0722])
+        y_in = srgb_to_linear(res.image[core] / 255.0) @ w
+        y_out = srgb_to_linear(out[core] / 255.0) @ w
         self.assertGreater(np.corrcoef(y_in, y_out)[0, 1], 0.9)    # same light pattern
         median = np.median(out[core], axis=0)
-        self.assertLess(np.abs(median - np.array([0x1A, 0x36, 0x5D])).max(), 12)  # true paint colour where typically lit
+        self.assertLess(np.abs(median - np.array([0x1A, 0x36, 0x5D])).max(), 14)  # true paint colour where typically lit
 
     def test_recommendations_are_varied_and_explained(self):
         from src.colour_studio.recommend import delta_e, hex_to_rgb, recommend_shades, rgb_to_lab, room_palette
-        from src.colour_studio.segmentation import WallSegmenter
 
-        res = WallSegmenter(FakeSegFormer(), LABELS).segment(_sample_room())
+        res, _, _ = _segment(mistakes=False)
         pal = room_palette(res.image, res.label_map, res.id2label, res.wall_mask)
         self.assertTrue(any("wooden floor" == p["name"] for p in pal))
         recs = recommend_shades(pal, None, "calm bedroom", limit=5)

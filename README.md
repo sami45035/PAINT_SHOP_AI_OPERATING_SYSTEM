@@ -60,6 +60,27 @@ On first use, Colour Studio downloads the wall-finding model once (SegFormer-B3 
 - **Faster but less accurate:** `set WALL_MODEL_REPO=Xenova/segformer-b0-finetuned-ade-512-512`
 - **Use a model file you already have:** `set WALL_MODEL_PATH=C:\path\to\model.onnx` (put its `config.json` next to it)
 - **No internet / download failed:** Colour Studio switches to **tap mode** — tap each wall on the photo and it grows the wall from that point, stopping at corners and edges.
+- **Faster wall finding:** `set WALL_MODEL_FLIP_PASS=0` skips the second (mirrored) model pass — about half the time, slightly rougher edges.
+
+### How walls are found (`src/colour_studio/refine.py`)
+The model predicts on a coarse grid, so its raw wall map has holes at lamp glow, leaks onto headboards and sofas, and ragged edges. The clean-up uses the photo itself:
+1. **Blotches** with no visible outline and the wall's colour are wall (a real frame or curtain has an outline).
+2. **Leaks** cut off from the wall by an edge but blending into furniture are removed.
+3. **Edges** — every border pixel is re-decided so the border sits on the strongest nearby edge.
+4. **Growth** across smooth colour changes fills bites (a light pool fading out is smooth; a ceiling corner isn't).
+5. **Holes** that aren't objects are filled.
+6. **Ceiling line** — a wall meets the ceiling in a straight line; where glare hides it, paint goes up to the fitted line.
+
+Walls are then split at corners and named from perspective (flat ceiling line = back wall, sloping = left/right).
+
+### Fixing a spot by hand
+Under **Pick a wall**, switch **Tap the photo to** → *Add a missed spot* or *Remove a spot*, then tap the patch. **Undo fix** / **Clear fixes** are next to it.
+
+### If a photo still comes out wrong
+```powershell
+python tools/wall_debug.py path\to\room.jpg
+```
+It saves `room_walls.jpg` (model / cleaned / named walls side by side) and a small `room_walls.npz`. Send those with the photo so the clean-up can be tuned on what the real model sees.
 
 Licence note: NVIDIA's SegFormer weights are released for research / non-commercial use. Fine for this prototype; check the licence (or swap the model — it sits behind one class, `WallSegmenter`) before commercial use.
 

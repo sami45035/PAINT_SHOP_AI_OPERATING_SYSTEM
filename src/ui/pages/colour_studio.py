@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - optional dependency
     HAS_CLICK = False
 
 SAMPLES = {"Bedroom": "master_bedroom.jpg", "Living room": "modern_living_room.jpg", "Dining room": "cozy_dining_room.jpg"}
+TAP_MODES = ["Pick walls", "Add a missed spot", "Remove a spot"]
 DISPLAY_W = 820
 TEAL_RGB = (11, 110, 121)
 SS = st.session_state
@@ -91,6 +92,8 @@ def _reset_for(img_id: str) -> None:
         SS["cs_sel"] = None          # None = pick a sensible default
         SS["cs_last_click"] = None
         SS["cs_render_cache"] = {}
+        SS["cs_fixes"] = []          # manual "add/remove a spot" taps for this photo
+        SS["cs_tap_mode"] = TAP_MODES[0]
 
 
 # ------------------------------------------------------------------ segmentation
@@ -102,12 +105,22 @@ def _segmentation(img_id: str, image: np.ndarray, segmenter) -> seg.Segmentation
             with st.spinner("Finding the walls…"):
                 cache.clear()
                 cache[key] = segmenter.segment(image)
-        return cache[key]
-    key = ("tap", img_id, tuple(SS.get("cs_taps", [])))
-    if key not in cache:
-        cache.clear()
-        cache[key] = seg.tap_result(image, SS.get("cs_taps", []))
-    return cache[key]
+        base = cache[key]
+    else:
+        key = ("tap", img_id, tuple(SS.get("cs_taps", [])))
+        if key not in cache:
+            cache.clear()
+            cache[key] = seg.tap_result(image, SS.get("cs_taps", []))
+        base = cache[key]
+    fixes = tuple(SS.get("cs_fixes", []))
+    if not fixes:
+        return base
+    fkey = (key, fixes)
+    fcache: Dict = SS.setdefault("cs_fix_cache", {})
+    if fkey not in fcache:
+        fcache.clear()
+        fcache[fkey] = seg.apply_fixes(base, list(fixes), SS.get("cs_sel") or [])
+    return fcache[fkey]
 
 
 def _default_selection(result: seg.SegmentationResult) -> List[int]:
@@ -129,6 +142,12 @@ def _handle_click(click, result: seg.SegmentationResult, shown_w: int, shown_h: 
     w = click.get("width") or shown_w
     h = click.get("height") or shown_h
     x, y = click["x"] / w, click["y"] / h
+    mode = SS.get("cs_tap_mode", TAP_MODES[0])
+    if mode != TAP_MODES[0]:
+        op = "add" if mode == TAP_MODES[1] else "remove"
+        SS.setdefault("cs_fixes", []).append((op, round(x, 4), round(y, 4)))
+        SS["cs_render_cache"] = {}
+        st.rerun()
     region = result.region_at(x, y)
     sel = set(SS.get("cs_sel") or [])
     if region is not None:
@@ -170,7 +189,8 @@ def _shade_list(shades: List[dict], key: str, reason_key: str = "reason") -> Non
                 )
             with c2:
                 selected = s["hex_code"] == current
-                if st.button("Chosen" if selected else "Use", key=f"{key}_{i}", disabled=selected,
+                if st.button("✓" if selected else "Use", key=f"{key}_{i}", disabled=selected,
+                             help="On the photo now" if selected else "Show this shade on the wall",
                              type="primary" if not selected else "secondary", use_container_width=True):
                     _set_shade(s)
                     st.rerun()
@@ -235,11 +255,29 @@ def render() -> None:
                         SS["cs_sel"] = [] if all_on else sorted(names.values())
                         st.rerun()
 
+            t1, t2 = st.columns([3, 2], vertical_alignment="center")
+            with t1:
+                st.radio("Tap the photo to", TAP_MODES, horizontal=True, key="cs_tap_mode",
+                         help="Missed a patch, or painted something that isn't wall? Switch here and tap it.")
+            with t2:
+                fixes = SS.get("cs_fixes", [])
+                if fixes:
+                    u1, u2 = st.columns(2)
+                    if u1.button("Undo fix", key="cs_undo_fix", use_container_width=True):
+                        fixes.pop()
+                        SS["cs_render_cache"] = {}
+                        st.rerun()
+                    if u2.button("Clear fixes", key="cs_clear_fixes", use_container_width=True):
+                        SS["cs_fixes"] = []
+                        SS["cs_render_cache"] = {}
+                        st.rerun()
+
             shade = SS.get("cs_shade")
             base = result.image
             if mode == "After" and shade and SS["cs_sel"]:
                 cache = SS.setdefault("cs_render_cache", {})
-                rkey = (img_id, tuple(SS["cs_sel"]), shade["hex_code"], result.method, tuple(SS.get("cs_taps", [])))
+                rkey = (img_id, tuple(SS["cs_sel"]), shade["hex_code"], result.method, tuple(SS.get("cs_taps", [])),
+                        tuple(SS.get("cs_fixes", [])))
                 if rkey not in cache:
                     cache.clear()
                     cache[rkey] = recolour(base, alpha, shade["hex_code"])
@@ -261,9 +299,17 @@ def render() -> None:
                 show_image(pil)
                 st.caption("Install `streamlit-image-coordinates` to pick walls by tapping the photo.")
 
-            if result.method == "model":
+            tap_mode = SS.get("cs_tap_mode", TAP_MODES[0])
+            n_fix = len(SS.get("cs_fixes", []))
+            fix_txt = f" · {n_fix} manual fix{'es' if n_fix != 1 else ''}" if n_fix else ""
+            if tap_mode == TAP_MODES[1]:
+                msg = "<b>Tap an unpainted patch</b> that should be wall — it's added to the nearest selected wall" + fix_txt
+            elif tap_mode == TAP_MODES[2]:
+                msg = "<b>Tap a painted patch</b> that isn't wall (headboard, curtain, ceiling) to take the paint off" + fix_txt
+            elif result.method == "model":
                 msg = (f"<b>{len(result.regions)} wall{'s' if len(result.regions) != 1 else ''} found</b> in "
-                       f"{result.seconds:.1f}s · ceiling, doors, windows and furniture are left untouched · tap a wall to add or remove it")
+                       f"{result.seconds:.1f}s · ceiling, doors, windows and furniture are left untouched · tap a wall to add or remove it"
+                       + fix_txt)
             elif result.regions:
                 msg = f"<b>{len(result.regions)} wall{'s' if len(result.regions) != 1 else ''} picked</b> · tap another wall to add it, tap a painted wall to remove it"
             else:
