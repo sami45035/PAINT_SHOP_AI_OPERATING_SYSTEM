@@ -6,7 +6,6 @@ Supports:
 3. Real-Time Stock Status Check & Nearest In-Stock Alternatives
 Wall finding, recolouring and room-aware suggestions live in src/colour_studio/.
 """
-import cv2
 import json
 import math
 import numpy as np
@@ -37,6 +36,8 @@ def color_distance_lab(rgb1: Tuple[int, int, int], rgb2: Tuple[int, int, int]) -
     """
     Computes Delta-E color distance between two RGB colors using CIE76 Lab approximation.
     """
+    import cv2  # loaded only when needed
+
     # Create 1x1 image and convert to LAB
     img1 = np.uint8([[list(rgb1)]])
     img2 = np.uint8([[list(rgb2)]])

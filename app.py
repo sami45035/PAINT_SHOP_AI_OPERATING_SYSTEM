@@ -7,20 +7,80 @@ L6 Colour Studio · L7 Ask Aura
 
 Run:  streamlit run app.py
 """
+import faulthandler
 import os
 import subprocess
 import sys
 from html import escape
 
-import streamlit as st
+# If a compiled library (OpenCV, pyarrow, ONNX Runtime…) crashes the process,
+# print where it happened to the log instead of dying silently.
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
+import pandas as pd  # noqa: E402
+
+try:
+    # pandas 3 stores text via pyarrow when it's installed; keep the classic
+    # storage — sturdier across pyarrow versions on Streamlit Cloud.
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
+
+import streamlit as st  # noqa: E402
 
 st.set_page_config(page_title="Apex Paint AI", page_icon="🎨", layout="wide", initial_sidebar_state="expanded")
 
 from src import clock  # noqa: E402
 from src.config import DB_PATH, DEMO_MODE, ESP32_DEFAULT_STREAM_URL, STORE_SHORT_NAME  # noqa: E402
 from src.ui import data, nav  # noqa: E402
-from src.ui.pages import alerts, ask_aura, colour_studio, overview, stock_reorder, store_camera  # noqa: E402
 from src.ui.theme import html, inject_css  # noqa: E402
+
+
+@st.cache_resource(show_spinner=False)
+def _log_versions() -> bool:
+    """One line in the server log with the versions in use (helps when something breaks)."""
+    import importlib
+
+    found = []
+    for name in ("streamlit", "pandas", "numpy", "pyarrow", "cv2", "PIL", "plotly", "onnxruntime"):
+        try:
+            found.append(f"{name} {importlib.import_module(name).__version__}")
+        except Exception as exc:  # noqa: BLE001
+            found.append(f"{name} unavailable ({type(exc).__name__})")
+    print(f"[apex] Python {sys.version.split()[0]} | " + " | ".join(found), file=sys.stderr, flush=True)
+    return True
+
+
+# Each screen's libraries load only when that screen is opened, so a problem in
+# one (e.g. the camera's OpenCV) can't stop the whole app from starting.
+def _overview():
+    from src.ui.pages import overview
+    overview.render()
+
+
+def _colour_studio():
+    from src.ui.pages import colour_studio
+    colour_studio.render()
+
+
+def _stock():
+    from src.ui.pages import stock_reorder
+    stock_reorder.render()
+
+
+def _alerts():
+    from src.ui.pages import alerts
+    alerts.render()
+
+
+def _camera():
+    from src.ui.pages import store_camera
+    store_camera.render()
+
+
+def _aura():
+    from src.ui.pages import ask_aura
+    ask_aura.render()
 
 
 @st.cache_resource(show_spinner="Preparing shop data…")
@@ -37,13 +97,15 @@ def _prepare_database(day: str) -> int:
 _prepare_database(clock.today_str())
 inject_css()
 
+_log_versions()
+
 pages = {
-    "overview": st.Page(overview.render, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
-    "colour": st.Page(colour_studio.render, title="Colour Studio", icon=":material/format_paint:", url_path="colour-studio"),
-    "stock": st.Page(stock_reorder.render, title="Stock & Reorder", icon=":material/inventory_2:", url_path="stock"),
-    "alerts": st.Page(alerts.render, title="Alerts", icon=":material/notifications:", url_path="alerts"),
-    "camera": st.Page(store_camera.render, title="Store Camera", icon=":material/videocam:", url_path="camera"),
-    "aura": st.Page(ask_aura.render, title="Ask Aura", icon=":material/chat:", url_path="ask-aura"),
+    "overview": st.Page(_overview, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
+    "colour": st.Page(_colour_studio, title="Colour Studio", icon=":material/format_paint:", url_path="colour-studio"),
+    "stock": st.Page(_stock, title="Stock & Reorder", icon=":material/inventory_2:", url_path="stock"),
+    "alerts": st.Page(_alerts, title="Alerts", icon=":material/notifications:", url_path="alerts"),
+    "camera": st.Page(_camera, title="Store Camera", icon=":material/videocam:", url_path="camera"),
+    "aura": st.Page(_aura, title="Ask Aura", icon=":material/chat:", url_path="ask-aura"),
 }
 nav.PAGES.update(pages)
 current = st.navigation(list(pages.values()), position="hidden")
