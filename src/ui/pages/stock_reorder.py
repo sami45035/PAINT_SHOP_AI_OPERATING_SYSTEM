@@ -60,8 +60,9 @@ def _reorder_plan(day: str) -> None:
         "Pack": rows["pack_size_litres"].map(pack),
         "On shelf": rows["current_stock"],
         "Coming": rows["on_order"],
-        "Sells / day": rows["effective_velocity"].round(1),
-        "Lasts about": rows["days_to_stockout"].map(lambda d: "under a day" if d < 1 else f"{d:.0f} days"),
+        "Sells / day": rows["effective_velocity"].map(lambda v: f"{v:.1f}"),
+        "Lasts about": rows["days_to_stockout"].map(
+            lambda d: "under a day" if d < 1 else ("about 1 day" if round(d) == 1 else f"{d:.0f} days")),
         "Supplier": rows["supplier_name"] + " · " + rows["lead_time_days"].astype(int).astype(str) + " days",
         "Order": rows["suggested_reorder_qty"],
         "When": rows["suggested_order_date"],
@@ -112,7 +113,7 @@ def _all_stock(day: str) -> None:
     show_table(pd.DataFrame({
         "SKU": view["sku"], "Product": view["shade_name"] + " · " + view["brand"], "Category": view["category"],
         "Pack": view["pack_size_litres"].map(pack), "On shelf": view["current_stock"], "Coming": view["on_order"],
-        "Price": view["selling_price"].map(rupees), "Expires in": view["days_to_expiry"].map(lambda d: f"{d} days" if d >= 0 else "expired"),
+        "Price": view["selling_price"].map(rupees), "Expires in": view["days_to_expiry"].map(lambda d: "expired" if d < 0 else (f"{d} day" if d == 1 else f"{d} days")),
         "Status": view["health_status"].map(STATUS_WORDS), "Shelf": view["shelf_location"], "Supplier": view["supplier_name"],
     }))
 
@@ -129,7 +130,7 @@ def _deal_checker(day: str) -> None:
             pid = st.selectbox("Product", list(labels), format_func=lambda k: labels[k])
             usual = float(options.loc[options["product_id"] == pid, "cost_price"].iloc[0])
             c1, c2 = st.columns(2)
-            price = c1.number_input("Offered price per can (₹)", min_value=1.0, value=round(usual * 0.8), step=10.0)
+            price = c1.number_input("Offered price per can (₹)", min_value=1.0, value=float(round(usual * 0.8)), step=10.0)
             qty = c2.number_input("Number of cans", min_value=1, value=40, step=5)
             months = st.number_input("Months until expiry", min_value=1, value=12, step=1)
             go = st.form_submit_button("Check this deal", type="primary", use_container_width=True)

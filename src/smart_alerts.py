@@ -132,6 +132,7 @@ def _dead_stock_alerts(conn, ref: date) -> List[Dict[str, Any]]:
         JOIN inventory i ON p.id = i.product_id
         LEFT JOIN sales s ON p.id = s.product_id
              AND DATE(s.sale_timestamp) > DATE(?, ?) AND DATE(s.sale_timestamp) <= DATE(?)
+             AND s.sale_timestamp <= ?
         WHERE i.current_stock >= ?
         GROUP BY p.id
         HAVING recent_sales <= ?
@@ -139,7 +140,7 @@ def _dead_stock_alerts(conn, ref: date) -> List[Dict[str, Any]]:
         """,
         conn,
         params=(ref.strftime("%Y-%m-%d"), f"-{DEAD_STOCK_DAYS} days", ref.strftime("%Y-%m-%d"),
-                DEAD_STOCK_MIN_UNITS, DEAD_STOCK_MAX_SALES),
+                clock.now_naive().strftime("%Y-%m-%d %H:%M:%S"), DEAD_STOCK_MIN_UNITS, DEAD_STOCK_MAX_SALES),
     )
     alerts = []
     for r in df.itertuples(index=False):

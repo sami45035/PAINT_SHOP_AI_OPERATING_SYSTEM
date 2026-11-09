@@ -29,8 +29,11 @@ def _engine(source: str, url: str) -> StoreVisionEngine:
         if eng is not None:
             eng.close_stream()
         eng = StoreVisionEngine(source_type=source, esp32_url=url)
-        eng.open_stream()
+        if eng.open_stream():
+            eng.start()                       # keeps counting in the background
         SS["cam_engine"], SS["cam_engine_key"] = eng, key
+    elif eng.connected and not eng.running:
+        eng.start()
     return eng
 
 
@@ -38,23 +41,47 @@ def _hour(h: int) -> str:
     return f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}"
 
 
+def _counts(eng: StoreVisionEngine, metrics: dict) -> dict:
+    if eng.source_type == "demo":
+        c = {"in": metrics.get("entered", 0), "out": metrics.get("exited", 0)}
+        c["inside"] = max(0, c["in"] - c["out"])
+        c["note"] = "Demo counts since this page opened — examples, not saved"
+        return c
+    c = db.get_door_counts_today()           # camera counts only, not the sample visitors
+    c["note"] = "Today, counted at the door line by this camera"
+    return c
+
+
 def _feed(eng: StoreVisionEngine) -> None:
-    frame, metrics = eng.process_frame()
+    frame, metrics = eng.snapshot()
+    if frame is None and not eng.running:
+        frame, metrics = eng.process_frame()   # no background reader (e.g. camera just stopped)
+    counts = _counts(eng, metrics or {})
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi_card("Came in", str(counts["in"]), "")
+    with c2:
+        kpi_card("Left", str(counts["out"]), "")
+    with c3:
+        kpi_card("Inside now", str(counts["inside"]), "")
+    with c4:
+        kpi_card("In view", str((metrics or {}).get("current_people", 0)), "")
+    st.caption(counts["note"])
     if frame is None:
+        msg = "Starting camera…" if eng.running else "No video"
         html('<div class="apx-card" style="background:#26313C;color:#C9CED6;height:300px;display:flex;'
-             'align-items:center;justify-content:center;text-align:center">No video</div>')
+             f'align-items:center;justify-content:center;text-align:center">{msg}</div>')
         return
     show_image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
-    if metrics.get("security_alert"):
-        a = metrics["security_alert"]
-        saved = "" if a.get("saved") else " (demo — not saved)"
-        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(a['type'], a['type']))}: {escape(a['details'])}{saved}")
-    SS["cam_last_metrics"] = metrics
+    alert = (metrics or {}).get("security_alert")
+    if alert:
+        saved = "" if alert.get("saved") else " (demo — not saved)"
+        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}: {escape(alert['details'])}{saved}")
 
 
 @st.fragment(run_every=2)
 def _live_feed() -> None:
-    """Re-runs only this part of the page every 2 seconds."""
+    """Re-runs only this part of the page every 2 seconds (the camera itself is read continuously)."""
     eng = SS.get("cam_engine")
     if eng is not None:
         _feed(eng)
@@ -79,19 +106,20 @@ def render() -> None:
     else:
         banner("act_now", "Not connected", escape(eng.status_message))
         if st.button("Try again", key="cam_retry"):
-            eng.open_stream()
+            if eng.open_stream():
+                eng.start()
             st.rerun()
 
     left, right = st.columns([3, 2], gap="large")
     with left:
         with st.container(border=True):
-            live = st.toggle("Live view (updates every 2 seconds)", value=True, key="cam_live",
+            live = st.toggle("Live view (screen updates every 2 seconds)", value=True, key="cam_live",
                              disabled=not eng.connected)
             if live and eng.connected:
                 _live_feed()
             else:
                 _feed(eng)
-                if eng.connected and st.button("Refresh frame", key="cam_refresh"):
+                if eng.connected and st.button("Refresh", key="cam_refresh"):
                     st.rerun()
 
             if source == "webcam" and not eng.connected:
@@ -113,23 +141,6 @@ def render() -> None:
                 st.caption(f"Stream address: {url} — change it in Settings (sidebar).")
 
     with right:
-        if source == "demo":
-            m = SS.get("cam_last_metrics", {})
-            counts = {"in": m.get("entered", 0), "out": m.get("exited", 0)}
-            counts["inside"] = max(0, counts["in"] - counts["out"])
-            note = "demo counts since this page opened"
-        else:
-            counts = db.get_door_counts_today()
-            note = "today, from the door line"
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            kpi_card("Came in", str(counts["in"]), "")
-        with c2:
-            kpi_card("Left", str(counts["out"]), "")
-        with c3:
-            kpi_card("Inside now", str(counts["inside"]), "")
-        st.caption(note.capitalize())
-
         with st.container(border=True):
             armed = not clock.is_store_open()
             hdr = chip("act_now", "Armed now") if armed else chip("info", f"Arms at {_hour(STORE_CLOSE_HOUR)}")

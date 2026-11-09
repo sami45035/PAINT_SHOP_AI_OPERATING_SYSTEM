@@ -92,7 +92,9 @@ To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 
 - **Laptop webcam:** works when the app runs on that laptop. On Streamlit Cloud the server can't see your laptop's camera — use the browser-camera snapshot on the same screen instead.
 - **ESP32-CAM:** flash the CameraWebServer example, join the shop Wi-Fi, then put the stream address (e.g. `http://192.168.1.100:81/stream`) in **Settings** in the sidebar.
-- Door line and staff-only zone can be adjusted on the Store Camera screen.
+- Door line and staff-only zone can be adjusted on the Store Camera screen. Put the door line where people's **feet** cross the doorway; the camera should see whole people walking through.
+- The camera is read continuously in the background (about 8 frames a second) while the app is open; the screen refreshes every 2 seconds. A person is counted once going in and once going out — standing on the line doesn't add counts, and someone close to the camera with their feet out of view isn't counted (they still show under **In view**).
+- **Came in / Left** on this screen are what the camera counted today. The sample visitor numbers on Overview are separate.
 - Alert photos are saved to `data/security_snapshots/`.
 
 ## Gemini (optional)

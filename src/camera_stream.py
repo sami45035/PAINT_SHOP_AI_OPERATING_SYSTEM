@@ -19,6 +19,7 @@ What it does with real video
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -67,7 +68,10 @@ class Track:
     centroid: Tuple[float, float]
     box: Tuple[int, int, int, int]
     last_seen: float
-    counted: bool = False
+    frames: int = 1
+    side: Optional[str] = None        # "out" (beyond the door line) or "in" (inside the shop)
+    counted_in: bool = False
+    counted_out: bool = False
     history: List[float] = field(default_factory=list)
 
 
@@ -95,6 +99,24 @@ class StoreVisionEngine:
         self.last_alert_at: Dict[str, float] = {}
         self.bg = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=32, detectShadows=True)
         self.frames_seen = 0
+
+        # Faces: so someone close to the camera (at the counter) is still seen
+        self.face = None
+        try:
+            path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+            if path.exists():
+                self.face = cv2.CascadeClassifier(str(path))
+                if self.face.empty():
+                    self.face = None
+        except Exception:
+            self.face = None
+
+        # Background reading: the camera is read continuously so people walking
+        # through the door aren't missed between screen refreshes.
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.latest: Tuple[Optional[np.ndarray], Dict[str, Any]] = (None, {})
 
         self.hog = None
         if hasattr(cv2, "HOGDescriptor"):
@@ -138,7 +160,46 @@ class StoreVisionEngine:
                                    "run the app on the laptop, or use the browser camera below.")
         return False
 
+    # ---------------------------------------------------------------- background
+    def start(self, fps: float = 8.0) -> None:
+        """Keep reading and analysing frames in the background until close_stream()."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        if not self.connected and not self.open_stream():
+            return
+        self._stop.clear()
+
+        def loop():
+            gap = 1.0 / fps
+            while not self._stop.is_set():
+                t0 = time.time()
+                frame = self.read_frame()
+                if frame is None:
+                    if self.source_type != "demo":
+                        break                       # camera gone: the screen shows the message
+                    continue
+                annotated, metrics = self.process_frame(frame)
+                with self._lock:
+                    self.latest = (annotated, metrics)
+                self._stop.wait(max(0.0, gap - (time.time() - t0)))
+
+        self._thread = threading.Thread(target=loop, name=f"camera-{self.source_type}", daemon=True)
+        self._thread.start()
+
+    def snapshot(self) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+        """Latest analysed frame from the background reader."""
+        with self._lock:
+            return self.latest
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def close_stream(self):
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        self._thread = None
         if self.cap is not None:
             self.cap.release()
         self.cap = None
@@ -192,6 +253,7 @@ class StoreVisionEngine:
 
     # ---------------------------------------------------------------- detection
     def detect_people(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Whole people (standing/walking). Used for door counting and the staff-only zone."""
         if self.source_type == "demo":
             h, w = frame.shape[:2]
             return [self._demo_person(w, h)]
@@ -211,13 +273,36 @@ class StoreVisionEngine:
         keep = np.asarray(keep).ravel().tolist() if len(keep) else []
         return [tuple(int(v / scale) for v in boxes[i]) for i in keep]
 
-    def _update_tracks(self, detections, line_y: int, now_s: float) -> Tuple[int, int]:
-        """Match detections to tracks; count crossings of the door line."""
+    def detect_faces(self, frame: np.ndarray, bodies) -> List[Tuple[int, int, int, int]]:
+        """Faces not already inside a body box: people close to the camera."""
+        if self.face is None or self.source_type == "demo":
+            return []
+        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        h, w = gray.shape
+        min_side = max(40, w // 16)
+        faces = self.face.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=6, minSize=(min_side, min_side))
+        out = []
+        for (x, y, fw, fh) in (faces if len(faces) else []):
+            cx, cy = x + fw / 2, y + fh / 2
+            if any(bx <= cx <= bx + bw and by <= cy <= by + bh for bx, by, bw, bh in bodies):
+                continue
+            out.append((int(x), int(y), int(fw), int(fh)))
+        return out
+
+    def _update_tracks(self, detections, line_y: int, now_s: float, frame_h: int = 480) -> Tuple[int, int]:
+        """
+        Match detections to tracks and count door-line crossings. A person is
+        counted only after being seen clearly on one side and then clearly on
+        the other (a margin either side of the line), at most once each way —
+        so someone standing on the line isn't counted over and over.
+        """
         entered = exited = 0
+        margin = 0.05 * frame_h
         unmatched = set(self.tracks)
         for (x, y, bw, bh) in detections:
-            c = (x + bw / 2.0, y + bh * 0.85)  # near the feet: better for a floor-level line
-            best, best_d = None, 120.0
+            feet_visible = y + bh < frame_h - 3            # a box cut off by the frame bottom can't tell
+            c = (x + bw / 2.0, y + bh * 0.9)
+            best, best_d = None, max(80.0, 0.6 * bh)
             for tid in unmatched:
                 d = math.dist(c, self.tracks[tid].centroid)
                 if d < best_d:
@@ -226,17 +311,26 @@ class StoreVisionEngine:
                 tr = Track(self.next_track_id, c, (x, y, bw, bh), now_s, history=[c[1]])
                 self.tracks[tr.id] = tr
                 self.next_track_id += 1
+            else:
+                unmatched.discard(best)
+                tr = self.tracks[best]
+                tr.centroid, tr.box, tr.last_seen = c, (x, y, bw, bh), now_s
+                tr.frames += 1
+                tr.history = (tr.history + [c[1]])[-20:]
+            if not feet_visible:
                 continue
-            unmatched.discard(best)
-            tr = self.tracks[best]
-            prev_y = tr.centroid[1]
-            tr.centroid, tr.box, tr.last_seen = c, (x, y, bw, bh), now_s
-            tr.history = (tr.history + [c[1]])[-20:]
-            if prev_y < line_y <= c[1]:
+            side = "out" if c[1] < line_y - margin else ("in" if c[1] > line_y + margin else None)
+            if side is None:
+                continue
+            if tr.side == "out" and side == "in" and tr.frames >= 2 and not tr.counted_in:
                 entered += 1
-            elif prev_y >= line_y > c[1]:
+                tr.counted_in = True
+            elif tr.side == "in" and side == "out" and tr.frames >= 2 and not tr.counted_out:
                 exited += 1
-        for tid in [t for t, tr in self.tracks.items() if now_s - tr.last_seen > 2.0]:
+                tr.counted_out = True
+            tr.side = side
+        stale = 4.0 if self.source_type == "demo" else 1.5
+        for tid in [t for t, tr in self.tracks.items() if now_s - tr.last_seen > stale]:
             del self.tracks[tid]
         return entered, exited
 
@@ -286,7 +380,8 @@ class StoreVisionEngine:
         after_hours = not clock.is_store_open(now)
 
         people = self.detect_people(frame)
-        entered, exited = self._update_tracks(people, line_y, time.time())
+        faces = self.detect_faces(frame, people)
+        entered, exited = self._update_tracks(people, line_y, time.time(), h)
         if entered or exited:
             self.total_entered += entered
             self.total_exited += exited
@@ -301,7 +396,7 @@ class StoreVisionEngine:
         alert = None
         motion = self._motion_fraction(frame) if self.source_type != "demo" else 0.0
         warming_up = self.frames_seen < 15  # background model needs a few frames
-        if after_hours and not warming_up and (motion > 0.015 or people):
+        if after_hours and not warming_up and (motion > 0.015 or people or faces):
             alert = self._maybe_alert(
                 "AFTER_HOURS_MOTION", "Main store area",
                 f"Movement at {clock.fmt_time(now)} while the shop is closed.", frame, now) or alert
@@ -315,6 +410,10 @@ class StoreVisionEngine:
                     "RESTRICTED_ZONE_ENTRY", "Storage room (staff only)",
                     f"Someone entered the staff-only zone at {clock.fmt_time(now)}.", frame, now) or alert
 
+        for (x, y, fw, fh) in faces:
+            cv2.rectangle(frame, (x, y), (x + fw, y + fh), GREEN, 2)
+            cv2.putText(frame, "Person", (x, max(14, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA)
+
         # Overlays
         cv2.line(frame, (0, line_y), (w, line_y), YELLOW, 2)
         cv2.putText(frame, "Door line", (10, line_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, YELLOW, 1, cv2.LINE_AA)
@@ -327,7 +426,7 @@ class StoreVisionEngine:
         return frame, {
             "connected": True,
             "status": self.status_message,
-            "current_people": len(people),
+            "current_people": len(people) + len(faces),
             "entered": self.total_entered,
             "exited": self.total_exited,
             "occupancy": self.current_occupancy,

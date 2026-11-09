@@ -24,6 +24,11 @@ def _day(d: Optional[date]) -> date:
     return d or clock.today()
 
 
+def _upto() -> str:
+    """Nothing after this moment counts (sample data has rows for later today)."""
+    return clock.now_naive().strftime("%Y-%m-%d %H:%M:%S")
+
+
 # --- Demo data upkeep ---------------------------------------------------------
 
 def ensure_demo_dates_current() -> int:
@@ -126,19 +131,22 @@ def get_inventory_status(on_day: Optional[date] = None) -> pd.DataFrame:
 
 # --- Sales, visitors & daily KPIs -------------------------------------------------
 
-def _day_totals(cur, d: date) -> Dict[str, float]:
+def _day_totals(cur, d: date, until_time: str = "23:59:59") -> Dict[str, float]:
+    """Totals for day d, counting only up to `until_time` (HH:MM:SS) and never past now."""
     ds = d.strftime("%Y-%m-%d")
+    cap = min(f"{ds} {until_time}", _upto())
     sales = cur.execute(
         """
         SELECT COALESCE(SUM(total_amount), 0) AS revenue,
                COALESCE(SUM(quantity), 0) AS units,
                COUNT(DISTINCT invoice_no) AS bills
-        FROM sales WHERE DATE(sale_timestamp) = ?;
+        FROM sales WHERE DATE(sale_timestamp) = ? AND sale_timestamp <= ?;
         """,
-        (ds,),
+        (ds, cap),
     ).fetchone()
     visitors = cur.execute(
-        "SELECT COALESCE(SUM(count_in), 0) FROM footfall_logs WHERE DATE(timestamp) = ?;", (ds,)
+        "SELECT COALESCE(SUM(count_in), 0) FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ?;",
+        (ds, cap),
     ).fetchone()[0]
     return {
         "revenue": float(sales[0]),
@@ -165,15 +173,17 @@ def get_sales_summary(days: int = 30, on_day: Optional[date] = None) -> Dict[str
     with get_connection() as conn:
         cur = conn.cursor()
         today_t = _day_totals(cur, ref)
-        yday_t = _day_totals(cur, ref - timedelta(days=1))
+        # Compare with yesterday up to the same time of day (a full day vs half a day isn't fair)
+        same_time = clock.now().strftime("%H:%M:%S") if ref == clock.today() else "23:59:59"
+        yday_t = _day_totals(cur, ref - timedelta(days=1), same_time)
 
         start = (ref - timedelta(days=days)).strftime("%Y-%m-%d")
         period = cur.execute(
             """
             SELECT COALESCE(SUM(total_amount), 0), COALESCE(SUM(quantity), 0), COUNT(DISTINCT invoice_no)
-            FROM sales WHERE DATE(sale_timestamp) > ? AND DATE(sale_timestamp) <= ?;
+            FROM sales WHERE DATE(sale_timestamp) > ? AND DATE(sale_timestamp) <= ? AND sale_timestamp <= ?;
             """,
-            (start, ref.strftime("%Y-%m-%d")),
+            (start, ref.strftime("%Y-%m-%d"), _upto()),
         ).fetchone()
 
         inv = cur.execute(
@@ -224,12 +234,12 @@ def get_daily_sales_timeseries(days: int = 45, on_day: Optional[date] = None) ->
            SUM(quantity) as daily_units,
            COUNT(DISTINCT invoice_no) as transaction_count
     FROM sales
-    WHERE DATE(sale_timestamp) >= ? AND DATE(sale_timestamp) <= ?
+    WHERE DATE(sale_timestamp) >= ? AND DATE(sale_timestamp) <= ? AND sale_timestamp <= ?
     GROUP BY DATE(sale_timestamp)
     ORDER BY sale_date;
     """
     with sqlite3.connect(DB_PATH) as conn:
-        return pd.read_sql_query(query, conn, params=(start, ref.strftime("%Y-%m-%d")))
+        return pd.read_sql_query(query, conn, params=(start, ref.strftime("%Y-%m-%d"), _upto()))
 
 
 def get_hourly_traffic(on_day: Optional[date] = None) -> pd.DataFrame:
@@ -238,19 +248,19 @@ def get_hourly_traffic(on_day: Optional[date] = None) -> pd.DataFrame:
     query = """
     WITH v AS (
         SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hour, SUM(count_in) AS visitors
-        FROM footfall_logs WHERE DATE(timestamp) = ? GROUP BY hour
+        FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ? GROUP BY hour
     ),
     b AS (
         SELECT CAST(strftime('%H', sale_timestamp) AS INTEGER) AS hour,
                COUNT(DISTINCT invoice_no) AS bills, SUM(total_amount) AS revenue
-        FROM sales WHERE DATE(sale_timestamp) = ? GROUP BY hour
+        FROM sales WHERE DATE(sale_timestamp) = ? AND sale_timestamp <= ? GROUP BY hour
     )
     SELECT v.hour, v.visitors, COALESCE(b.bills, 0) AS bills, COALESCE(b.revenue, 0) AS revenue
     FROM v LEFT JOIN b ON v.hour = b.hour
     ORDER BY v.hour;
     """
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(query, conn, params=(ds, ds))
+        df = pd.read_sql_query(query, conn, params=(ds, _upto(), ds, _upto()))
     df["conversion_pct"] = (df["bills"] / df["visitors"].where(df["visitors"] > 0) * 100).round(1).fillna(0.0)
     return df
 
@@ -267,18 +277,18 @@ def get_daily_traffic(days: int = 14, on_day: Optional[date] = None) -> pd.DataF
     query = """
     WITH v AS (
         SELECT DATE(timestamp) AS day, SUM(count_in) AS visitors
-        FROM footfall_logs WHERE DATE(timestamp) BETWEEN ? AND ? GROUP BY day
+        FROM footfall_logs WHERE DATE(timestamp) BETWEEN ? AND ? AND timestamp <= ? GROUP BY day
     ),
     b AS (
         SELECT DATE(sale_timestamp) AS day, COUNT(DISTINCT invoice_no) AS bills
-        FROM sales WHERE DATE(sale_timestamp) BETWEEN ? AND ? GROUP BY day
+        FROM sales WHERE DATE(sale_timestamp) BETWEEN ? AND ? AND sale_timestamp <= ? GROUP BY day
     )
     SELECT v.day, v.visitors, COALESCE(b.bills, 0) AS bills
     FROM v LEFT JOIN b ON v.day = b.day
     ORDER BY v.day;
     """
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(query, conn, params=(start, end, start, end))
+        df = pd.read_sql_query(query, conn, params=(start, end, _upto(), start, end, _upto()))
     df["conversion_pct"] = (df["bills"] / df["visitors"].where(df["visitors"] > 0) * 100).round(1).fillna(0.0)
     return df
 
@@ -328,13 +338,13 @@ def get_top_and_slow_shades(limit: int = 10, on_day: Optional[date] = None, wind
             SELECT p.shade_name, p.brand, p.category, p.hex_code,
                    SUM(s.quantity) as total_units_sold, SUM(s.total_amount) as total_revenue
             FROM sales s JOIN products p ON s.product_id = p.id
-            WHERE DATE(s.sale_timestamp) > ?
+            WHERE DATE(s.sale_timestamp) > ? AND s.sale_timestamp <= ?
             GROUP BY p.shade_name, p.brand, p.category, p.hex_code
             ORDER BY total_units_sold DESC
             LIMIT ?;
             """,
             conn,
-            params=(start, limit),
+            params=(start, _upto(), limit),
         )
         slow_df = pd.read_sql_query(
             """
@@ -343,14 +353,14 @@ def get_top_and_slow_shades(limit: int = 10, on_day: Optional[date] = None, wind
                    COALESCE(SUM(s.quantity), 0) as total_units_sold
             FROM products p
             JOIN inventory i ON p.id = i.product_id
-            LEFT JOIN sales s ON p.id = s.product_id AND DATE(s.sale_timestamp) > ?
+            LEFT JOIN sales s ON p.id = s.product_id AND DATE(s.sale_timestamp) > ? AND s.sale_timestamp <= ?
             WHERE i.current_stock > 0
             GROUP BY p.id
             ORDER BY total_units_sold ASC, tied_up_capital DESC
             LIMIT ?;
             """,
             conn,
-            params=(start, limit),
+            params=(start, _upto(), limit),
         )
     return {"top_shades": top_df, "slow_shades": slow_df}
 
@@ -409,14 +419,15 @@ def update_security_event_status(event_id: int, status: str) -> None:
 
 
 def log_footfall(count_in: int = 0, count_out: int = 0, occupancy: Optional[int] = None,
-                 at: Optional[datetime] = None) -> None:
+                 at: Optional[datetime] = None, source: str = "camera") -> None:
     """
-    Add people counted at the door to the current hour's row (creating it if
-    needed). Called with small increments from the camera, so one hour = one row.
+    Add people counted at the door to the current hour's row for this source
+    (creating it if needed). Camera counts are kept apart from sample data.
     """
     slot = (at or clock.now_naive()).strftime("%Y-%m-%d %H:00:00")
     with get_connection() as conn:
-        row = conn.execute("SELECT id, count_in, count_out FROM footfall_logs WHERE timestamp = ?;", (slot,)).fetchone()
+        row = conn.execute("SELECT id, count_in, count_out FROM footfall_logs WHERE timestamp = ? AND source = ?;",
+                           (slot, source)).fetchone()
         if row:
             new_in = row["count_in"] + count_in
             new_out = row["count_out"] + count_out
@@ -428,18 +439,21 @@ def log_footfall(count_in: int = 0, count_out: int = 0, occupancy: Optional[int]
         else:
             occ = occupancy if occupancy is not None else max(0, count_in - count_out)
             conn.execute(
-                "INSERT INTO footfall_logs (timestamp, count_in, count_out, occupancy, dwell_time_mins) VALUES (?, ?, ?, ?, ?);",
-                (slot, count_in, count_out, occ, 0.0),
+                "INSERT INTO footfall_logs (timestamp, count_in, count_out, occupancy, dwell_time_mins, source) "
+                "VALUES (?, ?, ?, ?, ?, ?);",
+                (slot, count_in, count_out, occ, 0.0, source),
             )
         conn.commit()
 
 
-def get_door_counts_today(on_day: Optional[date] = None) -> Dict[str, int]:
+def get_door_counts_today(on_day: Optional[date] = None, source: str = "camera") -> Dict[str, int]:
+    """People the camera counted at the door today (sample visitors are not included)."""
     ds = _day(on_day).strftime("%Y-%m-%d")
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT COALESCE(SUM(count_in),0), COALESCE(SUM(count_out),0) FROM footfall_logs WHERE DATE(timestamp) = ?;",
-            (ds,),
+            "SELECT COALESCE(SUM(count_in),0), COALESCE(SUM(count_out),0) FROM footfall_logs "
+            "WHERE DATE(timestamp) = ? AND source = ?;",
+            (ds, source),
         ).fetchone()
     return {"in": int(row[0]), "out": int(row[1]), "inside": max(0, int(row[0]) - int(row[1]))}
 
@@ -454,6 +468,9 @@ def log_footfall_entry(count_in: int, count_out: int, occupancy: int, dwell_mins
 def ensure_app_tables() -> None:
     """Small tables the app writes to (kept separate from the seeded data)."""
     with get_connection() as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(footfall_logs);").fetchall()]
+        if "source" not in cols:   # older databases: tell camera counts apart from sample data
+            conn.execute("ALTER TABLE footfall_logs ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS alert_actions (

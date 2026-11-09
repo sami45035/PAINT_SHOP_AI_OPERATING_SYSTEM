@@ -100,8 +100,30 @@ class TestLayer2KPIs(unittest.TestCase):
         daily = db.get_daily_traffic(7)
         with sqlite3.connect(DB_PATH) as c:
             for r in daily.itertuples(index=False):
-                raw = c.execute("SELECT SUM(count_in) FROM footfall_logs WHERE DATE(timestamp) = ?", (r.day,)).fetchone()[0]
+                raw = c.execute("SELECT SUM(count_in) FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ?",
+                                (r.day, clock.now_naive().strftime("%Y-%m-%d %H:%M:%S"))).fetchone()[0]
                 self.assertEqual(int(r.visitors), int(raw))
+
+    def test_nothing_after_now_counts(self):
+        fake_now = datetime.combine(clock.today(), datetime.min.time()).replace(hour=12, minute=30)
+        with mock.patch.object(db.clock, "now_naive", return_value=fake_now), \
+                mock.patch.object(db.clock, "now", return_value=fake_now.replace(tzinfo=clock.STORE_TZ)):
+            hourly = db.get_hourly_traffic()
+            self.assertLessEqual(hourly["hour"].max(), 12)
+            s = db.get_sales_summary()
+            with sqlite3.connect(DB_PATH) as c:
+                late = c.execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE DATE(sale_timestamp) = ? "
+                                 "AND sale_timestamp <= ?", (clock.today_str(), fake_now.strftime("%Y-%m-%d %H:%M:%S"))).fetchone()[0]
+            self.assertEqual(s["today_invoices"], late)
+
+    def test_camera_counts_exclude_sample_visitors(self):
+        tmp = Path(tempfile.mkdtemp()) / "shop.db"
+        shutil.copy(DB_PATH, tmp)
+        with mock.patch.object(db, "DB_PATH", tmp):
+            db.ensure_app_tables()
+            self.assertEqual(db.get_door_counts_today(), {"in": 0, "out": 0, "inside": 0})
+            db.log_footfall(3, 1)
+            self.assertEqual(db.get_door_counts_today(), {"in": 3, "out": 1, "inside": 2})
 
     def test_season_status_uses_today(self):
         st = db.get_season_status(date(2026, 11, 7))
@@ -176,6 +198,39 @@ class TestLayer5Camera(unittest.TestCase):
             self.assertGreaterEqual(m["exited"], 1)
             lf.assert_not_called()
             ls.assert_not_called()
+
+    def test_standing_on_the_line_is_not_counted_again_and_again(self):
+        from src.camera_stream import StoreVisionEngine
+
+        eng = StoreVisionEngine("webcam", log_to_db=False)
+        h, line = 480, int(0.68 * 480)
+        t = 0.0
+        # Someone hovering right on the door line for 40 frames: no counts
+        for i in range(40):
+            y_feet = line + (12 if i % 2 else -12)
+            e, x = eng._update_tracks([(300, int(y_feet - 0.9 * 150), 60, 150)], line, t, h)
+            self.assertEqual((e, x), (0, 0))
+            t += 0.12
+        # One clean walk in, then out: exactly one each way
+        eng2 = StoreVisionEngine("webcam", log_to_db=False)
+        totals = [0, 0]
+        for y_feet in list(range(line - 120, line + 120, 15)) + list(range(line + 120, line - 120, -15)):
+            e, x = eng2._update_tracks([(300, int(y_feet - 0.9 * 150), 60, 150)], line, t, h)
+            totals[0] += e
+            totals[1] += x
+            t += 0.12
+        self.assertEqual(totals, [1, 1])
+
+    def test_box_cut_off_by_frame_bottom_is_not_counted(self):
+        from src.camera_stream import StoreVisionEngine
+
+        eng = StoreVisionEngine("webcam", log_to_db=False)
+        h, line = 480, int(0.68 * 480)
+        total = 0
+        for i, top in enumerate(range(0, 300, 10)):        # someone close to the camera, feet out of view
+            e, x = eng._update_tracks([(200, top, 200, h - top)], line, i * 0.1, h)
+            total += e + x
+        self.assertEqual(total, 0)
 
     def test_missing_camera_is_reported(self):
         from src.camera_stream import StoreVisionEngine

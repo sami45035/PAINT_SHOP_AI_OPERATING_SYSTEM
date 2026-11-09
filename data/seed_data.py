@@ -96,7 +96,8 @@ def init_db():
         count_in INTEGER NOT NULL,
         count_out INTEGER NOT NULL,
         occupancy INTEGER NOT NULL,
-        dwell_time_mins REAL NOT NULL
+        dwell_time_mins REAL NOT NULL,
+        source TEXT NOT NULL DEFAULT 'sample'
     );
     """)
 

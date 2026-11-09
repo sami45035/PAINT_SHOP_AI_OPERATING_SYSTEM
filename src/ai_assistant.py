@@ -98,7 +98,7 @@ def tool_get_store_kpis() -> str:
     s = get_sales_summary(30)
     conv = f"{s['today_conversion_pct']:.1f}%" if s["today_conversion_pct"] is not None else "not available"
     change = (
-        f" ({'+' if s['revenue_change_pct'] >= 0 else ''}{s['revenue_change_pct']:.0f}% vs yesterday)"
+        f" ({'+' if s['revenue_change_pct'] >= 0 else ''}{s['revenue_change_pct']:.0f}% vs this time yesterday)"
         if s["revenue_change_pct"] is not None else ""
     )
     return (

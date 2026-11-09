@@ -87,11 +87,12 @@ def compute_sales_forecast(forecast_days: int = 30, on_day: Optional[date] = Non
             """
             SELECT product_id, SUM(quantity) as units_sold_30d, COUNT(DISTINCT invoice_no) as order_count_30d
             FROM sales
-            WHERE DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?)
+            WHERE DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?) AND sale_timestamp <= ?
             GROUP BY product_id;
             """,
             conn,
-            params=(ref.strftime("%Y-%m-%d"), f"-{LOOKBACK_DAYS} days", ref.strftime("%Y-%m-%d")),
+            params=(ref.strftime("%Y-%m-%d"), f"-{LOOKBACK_DAYS} days", ref.strftime("%Y-%m-%d"),
+                    clock.now_naive().strftime("%Y-%m-%d %H:%M:%S")),
         )
         cal = _load_calendar(conn)
 
