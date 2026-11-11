@@ -8,16 +8,15 @@ import numpy as np
 from PIL import Image
 
 _DIR = Path(__file__).parent
-_wall_brush = None
+_declared = {}
 
 
-def _component():
-    global _wall_brush
-    if _wall_brush is None:
+def _component(name: str = "wall_brush"):
+    if name not in _declared:
         import streamlit.components.v1 as components
 
-        _wall_brush = components.declare_component("wall_brush", path=str(_DIR / "wall_brush"))
-    return _wall_brush
+        _declared[name] = components.declare_component(name, path=str(_DIR / name))
+    return _declared[name]
 
 
 def to_data_url(arr: np.ndarray, fmt: str = "JPEG", quality: int = 90) -> str:
@@ -59,3 +58,23 @@ def wall_brush(*, key: str, photo_key: str, orig_url: str, painted_url: str, bas
         "photo": photo_key, "orig": orig_url, "painted": painted_url, "base": base_url,
         "width": int(width), "height": int(height), "edits": edits_url, "reset": int(reset), "size": int(size),
     })
+
+
+def browser_cam(*, key: str, ack: int, boxes, line: float, zone, interval_ms: int = 450, width: int = 480):
+    """
+    Live camera in the visitor's browser (works on Streamlit Cloud). Sends a small
+    JPEG about twice a second: returns {'seq', 'frame' (data URL), 'ts'} or None.
+    `ack` = last seq processed, so the browser never queues frames faster than we can count.
+    """
+    return _component("browser_cam")(key=key, default=None, ack=int(ack), boxes=boxes or [], line=float(line),
+                                     zone=[float(v) for v in zone], interval=int(interval_ms), width=int(width))
+
+
+def decode_image(data_url: str):
+    """data: URL (JPEG/PNG) -> BGR numpy image for OpenCV, or None."""
+    if not data_url or "," not in data_url:
+        return None
+    import cv2
+
+    raw = base64.b64decode(data_url.split(",", 1)[1])
+    return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)

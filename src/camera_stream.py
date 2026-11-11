@@ -41,7 +41,7 @@ from src.config import (
 from src.database import log_footfall, log_security_event
 
 SNAPSHOT_DIR = DATA_DIR / "security_snapshots"
-SOURCE_LABELS = {"webcam": "Laptop webcam", "esp32": "ESP32-CAM", "demo": "Demo feed"}
+SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo feed"}
 
 # Colours (BGR) for overlays
 YELLOW, RED, GREEN, WHITE, DARK = (74, 192, 245), (102, 112, 249), (128, 222, 74), (255, 255, 255), (43, 32, 21)
@@ -433,4 +433,10 @@ class StoreVisionEngine:
             "is_after_hours": after_hours,
             "security_alert": alert,
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            # Boxes as fractions of the frame, for drawing over a live browser video
+            "boxes": [{"x": x / w, "y": y / h, "w": bw / w, "h": bh / h,
+                       "zone": bool(zx1 <= x + bw // 2 <= zx2 and zy1 <= y + bh // 2 <= zy2), "kind": "person"}
+                      for (x, y, bw, bh) in people]
+                     + [{"x": x / w, "y": y / h, "w": fw / w, "h": fh / h, "zone": False, "kind": "face"}
+                        for (x, y, fw, fh) in faces],
         }

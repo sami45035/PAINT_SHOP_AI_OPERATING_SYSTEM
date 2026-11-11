@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --teal:#0B6E79; --ink:#15202B; --slate:#5A6472; --line:#E2E5EA; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; background:transparent; font-family:Inter, system-ui, -apple-system, sans-serif; color:var(--ink); }
+  .bar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:13px; flex-wrap:wrap; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 14px; font:inherit; font-weight:600; color:var(--ink); cursor:pointer; }
+  .btn.primary { background:var(--teal); border-color:var(--teal); color:#fff; }
+  .pill { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 10px; border-radius:999px; font-weight:600; font-size:12px; background:#F0F1F4; color:var(--slate); }
+  .pill.live { background:#E5F3EB; color:#067647; }
+  .pill.err { background:#FCEBE9; color:#B42318; }
+  .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
+  select { border:1px solid var(--line); border-radius:10px; padding:7px 8px; font:inherit; background:#fff; max-width:240px; }
+  .stage { position:relative; width:100%; aspect-ratio:4/3; background:#26313C; border-radius:10px; overflow:hidden; }
+  video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  .msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:#C9CED6; font-size:14px; padding:24px; line-height:1.5; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="start" class="btn primary">Start camera</button>
+  <select id="devices" style="display:none" title="Which camera"></select>
+  <span id="state" class="pill"><span class="dot"></span>Camera off</span>
+</div>
+<div class="stage" id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div class="msg" id="msg">Press <b>&nbsp;Start camera&nbsp;</b> and allow camera access.<br>Video stays in your browser; a small still is sent about twice a second to count people.</div>
+</div>
+
+<script>
+(function () {
+  function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
+  function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+
+  var video = document.getElementById("video"), overlay = document.getElementById("overlay");
+  var octx = overlay.getContext("2d");
+  var grab = document.createElement("canvas"), gctx = grab.getContext("2d");
+  var stream = null, seq = 0, ack = 0, sentAt = 0, timer = null;
+  var args = { boxes: [], line: 0.68, zone: [0.62, 0.08, 0.96, 0.62], interval: 450, width: 480 };
+  var btn = document.getElementById("start"), state = document.getElementById("state"), msg = document.getElementById("msg");
+  var sel = document.getElementById("devices");
+
+  function setState(text, cls) { state.className = "pill " + (cls || ""); state.innerHTML = '<span class="dot"></span>' + text; }
+
+  // Where the video actually sits inside the (object-fit: contain) box
+  function videoRect() {
+    var W = overlay.clientWidth, H = overlay.clientHeight, vw = video.videoWidth || 4, vh = video.videoHeight || 3;
+    var s = Math.min(W / vw, H / vh), w = vw * s, h = vh * s;
+    return { x: (W - w) / 2, y: (H - h) / 2, w: w, h: h };
+  }
+  function draw() {
+    var dpr = window.devicePixelRatio || 1;
+    overlay.width = overlay.clientWidth * dpr; overlay.height = overlay.clientHeight * dpr;
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
+    if (!stream) return;
+    var r = videoRect();
+    octx.font = "600 12px Inter, sans-serif"; octx.lineWidth = 2;
+    // door line
+    var ly = r.y + args.line * r.h;
+    octx.strokeStyle = octx.fillStyle = "#F5C04A";
+    octx.beginPath(); octx.moveTo(r.x, ly); octx.lineTo(r.x + r.w, ly); octx.stroke();
+    octx.fillText("Door line", r.x + 8, ly - 6);
+    // staff-only zone
+    var z = args.zone;
+    octx.strokeStyle = octx.fillStyle = "#F97066";
+    octx.strokeRect(r.x + z[0] * r.w, r.y + z[1] * r.h, (z[2] - z[0]) * r.w, (z[3] - z[1]) * r.h);
+    octx.fillText("Staff only", r.x + z[0] * r.w + 6, r.y + z[1] * r.h + 16);
+    // people
+    (args.boxes || []).forEach(function (b) {
+      octx.strokeStyle = octx.fillStyle = b.zone ? "#F97066" : "#4ADE80";
+      octx.strokeRect(r.x + b.x * r.w, r.y + b.y * r.h, b.w * r.w, b.h * r.h);
+      octx.fillText(b.kind === "face" ? "Person (close)" : "Person", r.x + b.x * r.w + 4, r.y + b.y * r.h - 5);
+    });
+  }
+
+  function tick() {
+    if (!stream || !video.videoWidth) return;
+    var waiting = seq > ack && Date.now() - sentAt < 4000;   // wait for the server to finish the last frame
+    if (waiting) return;
+    var w = args.width || 480, h = Math.round(w * video.videoHeight / video.videoWidth);
+    grab.width = w; grab.height = h;
+    gctx.drawImage(video, 0, 0, w, h);
+    seq += 1; sentAt = Date.now();
+    send("streamlit:setComponentValue", { value: { seq: seq, frame: grab.toDataURL("image/jpeg", 0.72), ts: sentAt }, dataType: "json" });
+  }
+
+  async function listCameras() {
+    try {
+      var devs = (await navigator.mediaDevices.enumerateDevices()).filter(function (d) { return d.kind === "videoinput"; });
+      if (devs.length > 1) {
+        var cur = stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings().deviceId;
+        sel.innerHTML = devs.map(function (d, i) {
+          return '<option value="' + d.deviceId + '"' + (d.deviceId === cur ? " selected" : "") + ">" + (d.label || ("Camera " + (i + 1))) + "</option>";
+        }).join("");
+        sel.style.display = "";
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function start(deviceId) {
+    stop();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setState("Camera not available", "err");
+      msg.innerHTML = "This browser can't share a camera here. Open the app over https (Streamlit Cloud is) in Chrome, Edge or Safari.";
+      setHeight(); return;
+    }
+    try {
+      setState("Asking for permission…");
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
+                        : { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      video.srcObject = stream; await video.play();
+      msg.style.display = "none";
+      btn.textContent = "Stop camera"; btn.classList.remove("primary");
+      setState("Live · counting", "live");
+      timer = setInterval(tick, Math.max(200, args.interval || 450));
+      listCameras();
+      draw();
+    } catch (e) {
+      stream = null;
+      var why = e && e.name === "NotAllowedError" ? "Camera permission was blocked. Click the camera icon in the address bar, allow it, then press Start again."
+              : e && e.name === "NotFoundError" ? "No camera found on this device."
+              : e && e.name === "NotReadableError" ? "The camera is busy — close other apps using it (Zoom, Teams, Camera) and try again."
+              : "Couldn't start the camera (" + (e && e.name || "error") + ").";
+      setState("Camera off", "err");
+      msg.style.display = ""; msg.textContent = why;
+    }
+    setHeight();
+  }
+  function stop() {
+    if (timer) clearInterval(timer); timer = null;
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    stream = null; video.srcObject = null;
+    btn.textContent = "Start camera"; btn.classList.add("primary");
+    setState("Camera off");
+    msg.style.display = ""; msg.innerHTML = "Camera stopped.";
+    draw();
+  }
+  btn.onclick = function () { if (stream) stop(); else start(sel.value || undefined); };
+  sel.onchange = function () { start(sel.value); };
+  window.addEventListener("resize", function () { draw(); setHeight(); });
+
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (!d || d.type !== "streamlit:render") return;
+    var a = d.args || {};
+    if (typeof a.ack === "number") ack = a.ack;
+    if (a.boxes) args.boxes = a.boxes;
+    if (typeof a.line === "number") args.line = a.line;
+    if (a.zone) args.zone = a.zone;
+    if (a.interval) args.interval = a.interval;
+    if (a.width) args.width = a.width;
+    draw(); setHeight();
+  });
+  send("streamlit:componentReady", { apiVersion: 1 });
+  setHeight();
+})();
+</script>
+</body>
+</html>

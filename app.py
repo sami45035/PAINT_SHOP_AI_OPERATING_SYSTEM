@@ -130,7 +130,7 @@ with st.sidebar:
         st.page_link(page, label=label, icon=page.icon)
 
     st.divider()
-    cam = {"webcam": "Laptop webcam", "esp32": "ESP32-CAM", "demo": "Demo feed"}[st.session_state.get("cam_source", "demo")]
+    cam = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo feed"}[st.session_state.get("cam_source", "demo")]
     gem = bool(st.session_state.get("gemini_key") or os.getenv("GEMINI_API_KEY"))
     aura = "Gemini" if gem and st.session_state.get("aura_mode") == "Gemini" else "Offline mode"
     now = clock.now()

@@ -2,7 +2,6 @@
 from html import escape
 
 import cv2
-import numpy as np
 import streamlit as st
 from PIL import Image
 
@@ -10,6 +9,7 @@ from src import clock, database as db
 from src.camera_stream import SOURCE_LABELS, StoreVisionEngine
 from src.config import ESP32_DEFAULT_STREAM_URL, STORE_CLOSE_HOUR, STORE_OPEN_HOUR
 from src.ui import data
+from src.ui.components import browser_cam, decode_image
 from src.ui.theme import banner, chip, html, kpi_card, page_header, show_image
 
 SS = st.session_state
@@ -87,6 +87,42 @@ def _live_feed() -> None:
         _feed(eng)
 
 
+@st.fragment
+def _browser_feed(eng: StoreVisionEngine) -> None:
+    """
+    The webcam of whoever has this page open (laptop, phone), streamed by the
+    browser — the only way a cloud server can see a camera. Only this part of
+    the page reruns for each frame.
+    """
+    val = browser_cam(key="cam_browser_live", ack=SS.get("bc_ack", 0), boxes=SS.get("bc_boxes", []),
+                      line=eng.door_line_y, zone=eng.zone_box)
+    if val and val.get("seq") and val["seq"] != SS.get("bc_ack"):
+        img = decode_image(val.get("frame", ""))
+        if img is not None:
+            _, m = eng.process_frame(img)
+            SS["bc_metrics"] = m
+            SS["bc_boxes"] = m.get("boxes", [])
+            if m.get("security_alert"):
+                SS["bc_alert"] = m["security_alert"]
+        SS["bc_ack"] = val["seq"]
+        st.rerun(scope="fragment")     # hand the boxes back and ask for the next frame
+    m = SS.get("bc_metrics") or {}
+    counts = _counts(eng, m)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi_card("Came in", str(counts["in"]), "")
+    with c2:
+        kpi_card("Left", str(counts["out"]), "")
+    with c3:
+        kpi_card("Inside now", str(counts["inside"]), "")
+    with c4:
+        kpi_card("In view", str(m.get("current_people", 0)), "")
+    st.caption("Today, counted at the door line through this browser's camera")
+    alert = SS.get("bc_alert")
+    if alert:
+        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}: {escape(alert['details'])}")
+
+
 def render() -> None:
     page_header("Store Camera", "Counts people at the door and guards the shop after closing.")
 
@@ -99,8 +135,12 @@ def render() -> None:
     url = SS.get("esp32_url", ESP32_DEFAULT_STREAM_URL)
     eng = _engine(source, url)
 
+    browser_mode = source == "webcam" and not eng.connected
     if source == "demo":
         banner("info", "Demo", escape(eng.status_message))
+    elif browser_mode:
+        banner("info", "Browser camera", "Using the camera of the device this page is open on (laptop or phone). "
+               "Press <b>Start camera</b> and allow access. Counts and alerts are saved like a shop camera's.")
     elif eng.connected:
         banner("healthy", "Live", escape(eng.status_message))
     else:
@@ -113,22 +153,17 @@ def render() -> None:
     left, right = st.columns([3, 2], gap="large")
     with left:
         with st.container(border=True):
-            live = st.toggle("Live view (screen updates every 2 seconds)", value=True, key="cam_live",
-                             disabled=not eng.connected)
-            if live and eng.connected:
-                _live_feed()
+            if browser_mode:
+                _browser_feed(eng)
             else:
-                _feed(eng)
-                if eng.connected and st.button("Refresh", key="cam_refresh"):
-                    st.rerun()
-
-            if source == "webcam" and not eng.connected:
-                snap = st.camera_input("Or take a snapshot with this device's camera", key="cam_browser")
-                if snap is not None:
-                    img = cv2.imdecode(np.frombuffer(snap.getvalue(), np.uint8), cv2.IMREAD_COLOR)
-                    frame, m = eng.process_frame(img)
-                    show_image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)),
-                               caption=f"{m['current_people']} person(s) found in this snapshot")
+                live = st.toggle("Live view (screen updates every 2 seconds)", value=True, key="cam_live",
+                                 disabled=not eng.connected)
+                if live and eng.connected:
+                    _live_feed()
+                else:
+                    _feed(eng)
+                    if eng.connected and st.button("Refresh", key="cam_refresh"):
+                        st.rerun()
 
             with st.expander("Adjust door line and staff-only zone"):
                 eng.door_line_y = st.slider("Door line height", 0.2, 0.95, float(eng.door_line_y), 0.01,
