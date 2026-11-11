@@ -23,7 +23,7 @@ from src.camera_stream import COUNT_MODES, SOURCE_LABELS, StoreVisionEngine
 from src.config import ESP32_DEFAULT_STREAM_URL, STORE_CLOSE_HOUR, STORE_OPEN_HOUR
 from src.formatting import rupees
 from src.shop_vision import draw_layout, save_layout
-from src.ui import data
+from src.ui import data, nav
 from src.ui.components import browser_cam, decode_image
 from src.ui.theme import banner, chip, html, kpi_card, page_header, show_chart, show_image
 
@@ -262,7 +262,10 @@ def _buyers_tab(src: str, day: str) -> None:
                f'{clock.now():%A}' if vs is not None else "today")
         kpi_card("Came in", str(f["came_in"]), sub)
     with c2:
-        if b["real_till"]:
+        if b.get("classified"):
+            kpi_card("Bought", f"{b['bought_visit_pct']:.0f}%",
+                     f"{b['bought_visits']} of {b['finished_visits']} visitors matched to a bill · {rupees(b['bought_value'])}")
+        elif b["real_till"]:
             pct = b["bought_pct"]
             if pct is not None and pct > 100:
                 kpi_card("Bought", "—", f"{b['bills']} bills but only {b['visitors']} visitors counted — "
@@ -274,8 +277,14 @@ def _buyers_tab(src: str, day: str) -> None:
         else:
             kpi_card("Reached the counter", str(b["at_counter"]), "no till in the demo")
     with c3:
-        kpi_card("Left without the counter", str(b["left_without_counter"]),
-                 f"of {b['finished_visits']} visits finished", attention=b["left_without_counter"] > b["at_counter"])
+        if b.get("classified"):
+            top = max(((k, n) for k, n in b["reasons"].items() if k != "unknown"), key=lambda kv: kv[1], default=None)
+            kpi_card("Didn't buy", str(b["didnt_buy"]), f"of {b['finished_visits']} visits · top reason: "
+                     + (REASON_WORDS.get(top[0], top[0]).lower() if top else "not recorded"),
+                     attention=b["didnt_buy"] > b["bought_visits"])
+        else:
+            kpi_card("Left without the counter", str(b["left_without_counter"]),
+                     f"of {b['finished_visits']} visits finished", attention=b["left_without_counter"] > b["at_counter"])
     with c4:
         kpi_card("Average stay", f"{f['avg_stay_min']:.0f} min" if f["avg_stay_min"] else "—", "per visit")
     with c5:
@@ -292,6 +301,9 @@ def _buyers_tab(src: str, day: str) -> None:
         with st.container(border=True):
             _title("Came in vs bought, by hour")
             show_chart(cc.hourly_buyers_chart(b["hourly"], b["real_till"]), key="cam_hourly")
+
+    if b.get("classified"):
+        _who_bought(b)
 
     tips = []
     for w in b["weak_hours"]:
@@ -316,6 +328,31 @@ def _buyers_tab(src: str, day: str) -> None:
         with st.container(border=True):
             _title("Visitors who bought · last 14 days")
             show_chart(cc.daily_bought_chart(data.cam_daily(src, day)), key="cam_daily")
+
+
+REASON_WORDS = {"price": "Price too high", "not_in_stock": "Shade / pack not in stock", "just_asking": "Just asking",
+                "come_back": "Will come back", "other": "Other", "unknown": "No reason recorded"}
+
+
+def _who_bought(b: dict) -> None:
+    """Each visitor: bought (a bill matched by time at the counter) or didn't — and why."""
+    left, right = st.columns([2, 3], gap="large")
+    with left:
+        with st.container(border=True):
+            _title("Who bought", "Each visit is matched to the bill saved while that customer was at the counter")
+            rows = [("healthy", "Bought", b["bought_visits"], rupees(b["bought_value"])),
+                    ("act_now", "Didn't buy", b["didnt_buy"], "")]
+            html("".join(f'<div class="apx-row">{chip(l, t)}<span class="apx-row-main"><b>{n}</b> visitor{"s" if n != 1 else ""}'
+                         f'</span><span class="apx-row-right">{v}</span></div>' for l, t, n, v in rows))
+            if b["unmatched_bills"]:
+                st.caption(f"{b['unmatched_bills']} bill(s) had nobody at the counter on camera (camera off, or billed later) "
+                           "— counted in sales, not linked to a visit.")
+            st.caption("People who came in together share one bill.")
+    with right:
+        with st.container(border=True):
+            _title("Why they didn't buy", "From the one-tap 'Didn't buy' on Scan & Bill")
+            show_chart(cc.reasons_chart(b["reasons"], REASON_WORDS), key="cam_reasons")
+            nav.link("bill", "Open Scan & Bill →")
 
 
 # ----------------------------------------------------------------------------- shelves & fast movers

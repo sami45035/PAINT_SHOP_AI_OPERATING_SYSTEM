@@ -135,12 +135,31 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     """
     ds, now = _ds(day), _now()
     foot = footfall(source, day)
-    v = _q("SELECT CAST(strftime('%H', entered_at) AS INTEGER) AS hour, reached_counter, shelves, picked, put_back, "
-           "outcome FROM visits WHERE source = ? AND DATE(entered_at) = ? AND left_at <= ?;", (source, ds, now))
+    if source != "demo":
+        try:                                   # give finished visits their bill / didn't-buy reason (by time)
+            from src.billing import match_visits
+
+            match_visits(source, datetime.strptime(ds, "%Y-%m-%d").date())
+        except Exception:  # noqa: BLE001 - older database without the billing columns
+            pass
+    try:
+        v = _q("SELECT CAST(strftime('%H', entered_at) AS INTEGER) AS hour, reached_counter, shelves, picked, put_back, "
+               "outcome, bill_no, no_sale_reason FROM visits WHERE source = ? AND DATE(entered_at) = ? AND left_at <= ?;",
+               (source, ds, now))
+    except Exception:  # noqa: BLE001
+        v = _q("SELECT CAST(strftime('%H', entered_at) AS INTEGER) AS hour, reached_counter, shelves, picked, put_back, "
+               "outcome, NULL AS bill_no, NULL AS no_sale_reason FROM visits WHERE source = ? AND DATE(entered_at) = ? "
+               "AND left_at <= ?;", (source, ds, now))
     since = camera_since(source, ds)
-    sales = _q("SELECT invoice_no, CAST(strftime('%H', MIN(sale_timestamp)) AS INTEGER) AS hour, SUM(total_amount) AS amount "
-               "FROM sales WHERE DATE(sale_timestamp) = ? AND sale_timestamp >= ? AND sale_timestamp <= ? GROUP BY invoice_no;",
-               (ds, since, now))
+    if source == "camera":
+        # a real camera is compared with bills made at the counter (Scan & Bill), since it started
+        sales = _q("SELECT invoice_no, CAST(strftime('%H', created_at) AS INTEGER) AS hour, total AS amount FROM bills "
+                   "WHERE source = 'app' AND status = 'paid' AND DATE(created_at) = ? AND created_at >= ? AND created_at <= ?;",
+                   (ds, since, now))
+    else:
+        sales = _q("SELECT invoice_no, CAST(strftime('%H', MIN(sale_timestamp)) AS INTEGER) AS hour, SUM(total_amount) AS amount "
+                   "FROM sales WHERE DATE(sale_timestamp) = ? AND sale_timestamp >= ? AND sale_timestamp <= ? GROUP BY invoice_no;",
+                   (ds, since, now))
     real_till = source != "demo"
     visitors = foot["came_in"]
     finished = len(v)
@@ -174,7 +193,23 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
                              "visitors": int(r.visitors), "bills": int(r.bills),
                              "missed_bills": int(round(r.visitors * rate - r.bills))})
     missed = sum(w["missed_bills"] for w in weak)
+
+    # Each visit: bought (a bill was matched to it) or didn't buy (with the reason staff tapped, if any)
+    has_bill = v["bill_no"].notna() & (v["bill_no"].astype(str) != "") if finished else pd.Series(dtype=bool)
+    bought_visits = int(has_bill.sum()) if finished else 0
+    didnt = finished - bought_visits
+    reasons: Dict[str, int] = {}
+    if finished:
+        for r in v.loc[~has_bill, "no_sale_reason"].fillna("unknown"):
+            reasons[r] = reasons.get(r, 0) + 1
+    matched_bills = set(v.loc[has_bill, "bill_no"]) if finished else set()
+    unmatched = int(len(set(sales["invoice_no"]) - matched_bills)) if real_till and len(sales) else 0
+    bought_value = float(sales[sales["invoice_no"].isin(matched_bills)]["amount"].sum()) if real_till and len(sales) else 0.0
     return {
+        "bought_visits": bought_visits, "didnt_buy": didnt, "reasons": reasons, "unmatched_bills": unmatched,
+        "bought_value": bought_value,
+        "classified": bool(real_till and finished and (bought_visits or any(k != "unknown" for k in reasons))),
+        "bought_visit_pct": round(bought_visits / finished * 100, 1) if finished else None,
         "visitors": visitors, "finished_visits": finished, "at_shelves": at_shelves, "at_counter": at_counter,
         "bills": bills, "bought_pct": round(rate * 100, 1) if rate is not None else None,
         "left_without_counter": left_without_counter, "walkouts": walkouts, "avg_bill": avg_bill,

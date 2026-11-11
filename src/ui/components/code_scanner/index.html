@@ -1,0 +1,184 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --teal:#0B6E79; --ink:#15202B; --slate:#5A6472; --line:#E2E5EA; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; background:transparent; font-family:Inter, system-ui, -apple-system, sans-serif; color:var(--ink); }
+  .bar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:13px; flex-wrap:wrap; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 14px; font:inherit; font-weight:600; color:var(--ink); cursor:pointer; }
+  .btn.primary { background:var(--teal); border-color:var(--teal); color:#fff; }
+  .pill { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 10px; border-radius:999px; font-weight:600; font-size:12px; background:#F0F1F4; color:var(--slate); }
+  .pill.live { background:#E5F3EB; color:#067647; }
+  .pill.err { background:#FCEBE9; color:#B42318; }
+  .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
+  select { border:1px solid var(--line); border-radius:10px; padding:7px 8px; font:inherit; background:#fff; max-width:200px; }
+  .stage { position:relative; width:100%; aspect-ratio:4/3; background:#26313C; border-radius:10px; overflow:hidden; }
+  video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .aim { position:absolute; left:20%; right:20%; top:22%; bottom:22%; border:3px solid rgba(255,255,255,.85); border-radius:14px;
+         box-shadow:0 0 0 2000px rgba(0,0,0,.25); transition:border-color .15s; }
+  .aim.hit { border-color:#4ADE80; }
+  .msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:#C9CED6; font-size:14px; padding:24px; line-height:1.5; }
+  .last { margin-top:8px; font-size:13px; color:var(--slate); min-height:20px; }
+  .last b { color:var(--ink); }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="start" class="btn primary">Start scanner</button>
+  <select id="devices" style="display:none" title="Which camera"></select>
+  <span id="state" class="pill"><span class="dot"></span>Scanner off</span>
+</div>
+<div class="stage">
+  <video id="video" playsinline muted></video>
+  <div class="aim" id="aim" style="display:none"></div>
+  <div class="msg" id="msg">Press <b>&nbsp;Start scanner&nbsp;</b> and hold a can's QR label (or barcode) inside the box.</div>
+</div>
+<div class="last" id="last"></div>
+
+<script>
+(function () {
+  function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
+  function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+
+  var video = document.getElementById("video"), btn = document.getElementById("start"), sel = document.getElementById("devices");
+  var state = document.getElementById("state"), msg = document.getElementById("msg"), aim = document.getElementById("aim");
+  var lastEl = document.getElementById("last");
+  var stream = null, timer = null, detector = null, jsqrReady = false, busy = false;
+  var canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+  var recent = {}, REPEAT_MS = 2500;
+  var audio = null;
+
+  function setState(text, cls) { state.className = "pill " + (cls || ""); state.innerHTML = '<span class="dot"></span>' + text; }
+
+  function beep() {
+    try {
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+      var o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.value = 1450; g.gain.value = 0.08;
+      o.connect(g); g.connect(audio.destination); o.start(); o.stop(audio.currentTime + 0.09);
+    } catch (e) { /* no sound */ }
+    if (navigator.vibrate) navigator.vibrate(60);
+    aim.classList.add("hit"); setTimeout(function () { aim.classList.remove("hit"); }, 250);
+  }
+
+  function found(code, format) {
+    var now = Date.now();
+    if (recent[code] && now - recent[code] < REPEAT_MS) return;     // the same can still in front of the camera
+    recent[code] = now;
+    beep();
+    lastEl.innerHTML = "Scanned: <b>" + code.replace(/</g, "&lt;") + "</b>";
+    send("streamlit:setComponentValue", { value: { code: code, format: format || "", ts: now }, dataType: "json" });
+  }
+
+  async function setupDecoder() {
+    if ("BarcodeDetector" in window) {
+      try {
+        var want = ["qr_code", "ean_13", "ean_8", "code_128", "code_39", "upc_a", "upc_e", "itf"];
+        var have = await window.BarcodeDetector.getSupportedFormats();
+        var formats = want.filter(function (f) { return have.indexOf(f) >= 0; });
+        if (formats.length) { detector = new window.BarcodeDetector({ formats: formats }); return "barcodes + QR"; }
+      } catch (e) { detector = null; }
+    }
+    // Fallback (e.g. Chrome on Windows): jsQR reads QR labels
+    await new Promise(function (ok) {
+      if (window.jsQR) return ok();
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      s.onload = ok; s.onerror = ok;
+      document.head.appendChild(s);
+    });
+    jsqrReady = !!window.jsQR;
+    return jsqrReady ? "QR labels" : "";
+  }
+
+  async function tick() {
+    if (busy || !stream || !video.videoWidth) return;
+    busy = true;
+    try {
+      if (detector) {
+        var codes = await detector.detect(video);
+        if (codes && codes.length) found(codes[0].rawValue, codes[0].format);
+      } else if (jsqrReady) {
+        var w = 640, h = Math.round(w * video.videoHeight / video.videoWidth);
+        canvas.width = w; canvas.height = h;
+        ctx.drawImage(video, 0, 0, w, h);
+        var img = ctx.getImageData(0, 0, w, h);
+        var q = window.jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
+        if (q && q.data) found(q.data, "qr_code");
+      }
+    } catch (e) { /* a frame that couldn't be read */ }
+    busy = false;
+  }
+
+  async function listCameras() {
+    try {
+      var devs = (await navigator.mediaDevices.enumerateDevices()).filter(function (d) { return d.kind === "videoinput"; });
+      if (devs.length > 1) {
+        var cur = stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings().deviceId;
+        sel.innerHTML = devs.map(function (d, i) {
+          return '<option value="' + d.deviceId + '"' + (d.deviceId === cur ? " selected" : "") + ">" + (d.label || ("Camera " + (i + 1))) + "</option>";
+        }).join("");
+        sel.style.display = "";
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function start(deviceId) {
+    stop(true);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setState("Camera not available", "err");
+      msg.textContent = "This browser can't use a camera here. Open the app over https in Chrome, Edge or Safari — or add items by name.";
+      setHeight(); return;
+    }
+    try {
+      setState("Asking for permission…");
+      var what = await setupDecoder();
+      if (!what) {
+        setState("Scanner unavailable", "err");
+        msg.textContent = "Couldn't load the code reader (no internet for the browser?). Add items by name instead.";
+        setHeight(); return;
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+                        : { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false });
+      video.srcObject = stream; await video.play();
+      msg.style.display = "none"; aim.style.display = "";
+      btn.textContent = "Stop scanner"; btn.classList.remove("primary");
+      setState("Scanning · " + what, "live");
+      timer = setInterval(tick, 120);
+      listCameras();
+    } catch (e) {
+      stream = null;
+      var why = e && e.name === "NotAllowedError" ? "Camera permission was blocked. Click the camera icon in the address bar, allow it, then press Start again."
+              : e && e.name === "NotFoundError" ? "No camera found on this device."
+              : e && e.name === "NotReadableError" ? "The camera is busy — close other tabs or apps using it (e.g. Store Camera) and try again."
+              : "Couldn't start the camera (" + (e && e.name || "error") + ").";
+      setState("Scanner off", "err");
+      msg.style.display = ""; msg.textContent = why;
+    }
+    setHeight();
+  }
+  function stop(quiet) {
+    if (timer) clearInterval(timer); timer = null;
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    stream = null; video.srcObject = null; aim.style.display = "none";
+    btn.textContent = "Start scanner"; btn.classList.add("primary");
+    setState("Scanner off");
+    if (!quiet) { msg.style.display = ""; msg.innerHTML = "Scanner stopped."; }
+  }
+  btn.onclick = function () { if (stream) stop(); else start(sel.value || undefined); };
+  sel.onchange = function () { start(sel.value); };
+  window.addEventListener("resize", setHeight);
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (d && d.type === "streamlit:render") setHeight();
+  });
+  send("streamlit:componentReady", { apiVersion: 1 });
+  setHeight();
+})();
+</script>
+</body>
+</html>

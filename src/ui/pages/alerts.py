@@ -9,7 +9,7 @@ from src.dashboard_views import render_hourly_traffic_chart
 from src.ui import data
 from src.ui.theme import chip, html, page_header, show_chart
 
-GROUPS = ["All", "Running out", "Shelves", "Theft", "Expiring", "Money stuck", "Visitors vs bills"]
+GROUPS = ["All", "Running out", "Lost sales", "Shelves", "Theft", "Expiring", "Money stuck", "Visitors vs bills"]
 HIDE_DAYS = 3
 
 

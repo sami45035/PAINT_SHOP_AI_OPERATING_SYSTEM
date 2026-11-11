@@ -31,6 +31,7 @@ DAYS = 30
 CAPACITY = 8                       # cans that fit side by side on one shelf slot
 # How often a browser picks this shelf's can up (and puts it back)
 BROWSE_INTEREST = {"A1": 0.08, "A2": 0.45, "A3": 0.03, "B1": 0.06, "B2": 0.05, "B3": 0.04}
+REASON_MIX = {"price": 25, "not_in_stock": 20, "just_asking": 38, "come_back": 17}   # why browsers didn't buy
 NEGLECTED = {"B1": 4, "B3": 6}     # slot -> refills skipped for the last N days (shelves running low now)
 
 
@@ -41,8 +42,17 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
     cols = [r[1] for r in cur.execute("PRAGMA table_info(security_events);").fetchall()]
     if "source" not in cols:
         cur.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
-    for table in ("visits", "shelf_events", "shelf_status"):
+    from src.billing import ensure_tables as billing_tables
+
+    billing_tables(conn)                     # bills / didn't-buy tables and the visit columns they need
+    for table in ("visits", "shelf_events", "shelf_status", "no_sales"):
         cur.execute(f"DELETE FROM {table} WHERE source = 'sample';")
+    why_rnd = random.Random(seed + 1)        # separate stream: reasons don't change the rest of the story
+    no_sales = []
+    # shades customers asked for that the shop is short of (they turn up under "not in stock")
+    low_stock = [r[0] for r in cur.execute(
+        "SELECT p.id FROM products p JOIN inventory i ON i.product_id = p.id WHERE p.category != 'Waterproofing' "
+        "GROUP BY p.id HAVING SUM(i.current_stock) <= MIN(i.min_threshold) ORDER BY p.id;").fetchall()][:5]
     cur.execute("DELETE FROM security_events WHERE event_type = 'UNPAID_EXIT' AND source = 'sample';")
 
     latest = cur.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales;").fetchone()[0]
@@ -129,7 +139,8 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
                                 picked += take
                     if not shelves and rnd.random() < 0.4:
                         shelves.add(rnd.choice(list(pid)))
-                    visits.append(("sample", entered, left, True, shelves, picked, back, "reached_counter"))
+                    visits.append(("sample", entered, left, True, shelves, picked, back, "reached_counter",
+                                   {"bill_no": inv, "counter_from": paid - timedelta(minutes=2), "counter_to": paid + timedelta(seconds=40)}))
                     continue
                 entered = hour_start + timedelta(minutes=rnd.uniform(0, 50))
                 stay = max(2.0, rnd.gauss((dwell or 14) * 0.6, 3))
@@ -139,7 +150,7 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
                     take = min(n, level[sid])
                     ev(entered + timedelta(minutes=stay * 0.5), sid, "pick", take)
                     level[sid] -= take
-                    visits.append(("sample", entered, left, False, {sid}, take, 0, "unpaid_exit"))
+                    visits.append(("sample", entered, left, False, {sid}, take, 0, "unpaid_exit", {}))
                     continue
                 shelves, back = set(), 0
                 if rnd.random() < 0.7:
@@ -152,17 +163,32 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
                             ev(at + timedelta(minutes=1), sid, "put_back", 1)
                             back += 1
                 counter = rnd.random() < 0.15        # asked something at the counter, didn't buy
+                extra = {}
+                if counter:
+                    mid = entered + (left - entered) / 2
+                    extra = {"counter_from": mid - timedelta(minutes=1), "counter_to": mid + timedelta(minutes=1)}
+                if why_rnd.random() < 0.45:                  # staff tapped "Didn't buy" with a reason
+                    reason = why_rnd.choices(list(REASON_MIX), weights=list(REASON_MIX.values()))[0]
+                    pid_wanted = (why_rnd.choice(low_stock) if reason == "not_in_stock" and low_stock
+                                  and why_rnd.random() < 0.5 else None)    # staff don't always note the shade
+                    at = left - timedelta(seconds=30)
+                    no_sales.append(("sample", at.strftime("%Y-%m-%d %H:%M:%S"), reason, pid_wanted))
+                    extra["no_sale_reason"] = reason
                 visits.append(("sample", entered, left, counter, shelves, 0, back,
-                               "reached_counter" if counter else "browsed"))
+                               "reached_counter" if counter else "browsed", extra))
         day += timedelta(days=1)
 
     cur.executemany("INSERT INTO shelf_events (source, at, slot_id, product_id, kind, qty) VALUES (?, ?, ?, ?, ?, ?);",
                     events)
+    fmt = lambda d: d.strftime("%Y-%m-%d %H:%M:%S") if d else None
     cur.executemany(
-        "INSERT INTO visits (source, entered_at, left_at, dwell_s, reached_counter, shelves, picked, put_back, outcome) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
-        [(src, a.strftime("%Y-%m-%d %H:%M:%S"), b.strftime("%Y-%m-%d %H:%M:%S"), (b - a).total_seconds(), int(c),
-          ",".join(sorted(sh)), pk, bk, out) for src, a, b, c, sh, pk, bk, out in visits])
+        "INSERT INTO visits (source, entered_at, left_at, dwell_s, reached_counter, shelves, picked, put_back, outcome, "
+        "counter_from, counter_to, bill_no, no_sale_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        [(src, fmt(a), fmt(b), (b - a).total_seconds(), int(c), ",".join(sorted(sh)), pk, bk, out,
+          fmt(x.get("counter_from")), fmt(x.get("counter_to")), x.get("bill_no"), x.get("no_sale_reason"))
+         for src, a, b, c, sh, pk, bk, out, x in visits])
+    cur.executemany("INSERT INTO no_sales (at, source, reason, product_id) VALUES (?, ?, ?, ?);",
+                    [(at, src, r, pid) for src, at, r, pid in no_sales])
 
     labels = {sid: f"{shade} {size:g} L" for sid, shade, size in DEMO_SLOT_PRODUCTS}
     for (ago, hr), (sid, n, status) in walkouts.items():

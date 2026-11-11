@@ -472,7 +472,9 @@ class StoreVisionEngine:
         entered = j.entered_at or now.replace(tzinfo=None)
         if self.log_to_db:
             log_visit(self.data_source, entered, entered + timedelta(seconds=stay),
-                      j.reached_counter, j.shelves, picked, j.put_back, outcome)
+                      j.reached_counter, j.shelves, picked, j.put_back, outcome,
+                      counter_from=j.counter_from if j.reached_counter else None,
+                      counter_to=j.counter_to if j.reached_counter else None)
         words = {"reached_counter": "went to the counter", "browsed": "looked around", "unpaid_exit": "left with a can"}
         stay_txt = f"{stay / 60:.0f} min" if stay >= 90 else f"{stay:.0f} s"
         self._event("visit", f"Customer left after {stay_txt} — {words.get(outcome, outcome)}"
@@ -537,6 +539,10 @@ class StoreVisionEngine:
                 tr._jt = now_s
             if at_ctr:
                 j.counter_s += dt
+                stamp = now.replace(tzinfo=None)
+                if j.counter_from is None:
+                    j.counter_from = stamp
+                j.counter_to = stamp
                 if not j.reached_counter and j.counter_s >= COUNTER_SECONDS:
                     j.reached_counter = True
                     self._event("counter", "Customer at the billing counter")

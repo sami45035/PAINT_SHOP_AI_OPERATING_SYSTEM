@@ -223,7 +223,7 @@ class TestLayer4Alerts(unittest.TestCase):
         from src.smart_alerts import alert_id, flatten_alerts, generate_smart_alerts
 
         a = generate_smart_alerts()
-        self.assertEqual(set(a), {"critical", "expiring", "dead_stock", "anomalies", "camera"})
+        self.assertEqual(set(a), {"critical", "expiring", "dead_stock", "anomalies", "camera", "lost"})
         for x in a["expiring"]:
             self.assertIn("expire", x["title"])
         for x in a["anomalies"]:

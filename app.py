@@ -68,6 +68,11 @@ def _colour_studio():
     colour_studio.render()
 
 
+def _scan_bill():
+    from src.ui.pages import scan_bill
+    scan_bill.render()
+
+
 def _stock():
     from src.ui.pages import stock_reorder
     stock_reorder.render()
@@ -116,6 +121,7 @@ pages = {
     "overview": st.Page(_overview, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
     "forecast": st.Page(_forecast, title="Sales Forecast", icon=":material/trending_up:", url_path="sales-forecast"),
     "colour": st.Page(_colour_studio, title="Colour Studio", icon=":material/format_paint:", url_path="colour-studio"),
+    "bill": st.Page(_scan_bill, title="Scan & Bill", icon=":material/qr_code_scanner:", url_path="scan-bill"),
     "stock": st.Page(_stock, title="Stock & Reorder", icon=":material/inventory_2:", url_path="stock"),
     "alerts": st.Page(_alerts, title="Alerts", icon=":material/notifications:", url_path="alerts"),
     "camera": st.Page(_camera, title="Store Camera", icon=":material/videocam:", url_path="camera"),

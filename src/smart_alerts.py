@@ -261,6 +261,33 @@ def _camera_alerts(ref: date) -> List[Dict[str, Any]]:
     return alerts
 
 
+def _lost_sale_alerts(ref: date) -> List[Dict[str, Any]]:
+    """Shades customers asked for this week and left without, because they weren't in stock."""
+    from src import billing
+
+    asked = billing.asked_not_stocked(7, ref)
+    if asked.empty:
+        return []
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+        stock = dict(conn.execute("SELECT product_id, SUM(current_stock) FROM inventory GROUP BY product_id;").fetchall())
+    out = []
+    for r in asked.to_dict("records"):
+        if r["times"] < 2:
+            continue
+        have = int(stock.get(r["product_id"], 0) or 0)
+        out.append({
+            "type": "LOST_SALE", "group": "Lost sales", "level": "act_now" if r["times"] >= 4 else "soon",
+            "severity": "WARNING", "sku": f"lost{r['product_id']}:{ref.isoformat()}", "product_id": int(r["product_id"]),
+            "hex_code": r["hex_code"],
+            "title": f"{r['label']} — {r['times']} customers left without it this week",
+            "description": (f"Staff recorded 'not in stock' for {r['label']} ({r['brand']}) {r['times']} times in 7 days. "
+                            + ("There are none in the shop now." if have == 0 else f"Only {have} in the shop now.")
+                            + " Each one is a sale that walked out — order it, or offer the nearest shade."),
+            "action": "Noted",
+        })
+    return out
+
+
 def generate_smart_alerts(on_day: Optional[date] = None) -> Dict[str, List[Dict[str, Any]]]:
     """
     Returns alerts grouped as:
@@ -285,13 +312,14 @@ def generate_smart_alerts(on_day: Optional[date] = None) -> Dict[str, List[Dict[
         "dead_stock": guard("Alerts · money stuck", with_conn, _dead_stock_alerts, show=False, default=[]),
         "anomalies": guard("Alerts · visitors vs bills", _visitor_alerts, ref, show=False, default=[]),
         "camera": guard("Alerts · camera", _camera_alerts, ref, show=False, default=[]),
+        "lost": guard("Alerts · lost sales", _lost_sale_alerts, ref, show=False, default=[]),
     }
 
 
 def flatten_alerts(alerts: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """All alerts in one list, most urgent first."""
     order = {"act_now": 0, "soon": 1, "look_into": 2}
-    items = [a for group in ("critical", "camera", "expiring", "dead_stock", "anomalies") for a in alerts.get(group, [])]
+    items = [a for group in ("critical", "lost", "camera", "expiring", "dead_stock", "anomalies") for a in alerts.get(group, [])]
     return sorted(items, key=lambda a: order.get(a.get("level"), 3))
 
 

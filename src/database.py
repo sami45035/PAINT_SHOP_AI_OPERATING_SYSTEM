@@ -620,6 +620,9 @@ def ensure_app_tables() -> None:
         if "source" not in sec_cols:
             conn.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
         conn.executescript(CAMERA_TABLES_SQL)
+        from src.billing import ensure_tables as _billing_tables
+
+        _billing_tables(conn)                  # bills, stock moves, didn't-buys, barcodes; visit columns
         has_sample = conn.execute("SELECT 1 FROM visits WHERE source = 'sample' LIMIT 1;").fetchone()
         if DEMO_MODE and not has_sample and conn.execute("SELECT 1 FROM sales LIMIT 1;").fetchone():
             import sys as _sys
@@ -670,7 +673,9 @@ def get_hidden_alert_ids(on_day: Optional[date] = None) -> set:
 def mark_ordered(product_id: int, qty: int) -> None:
     """Record that cans were ordered from the supplier (adds to 'on order')."""
     with get_connection() as conn:
-        conn.execute("UPDATE inventory SET on_order = on_order + ? WHERE product_id = ?;", (int(qty), int(product_id)))
+        # one batch row carries the order (it used to be added to every batch of the product)
+        conn.execute("UPDATE inventory SET on_order = on_order + ? WHERE id = (SELECT id FROM inventory WHERE product_id = ? "
+                     "ORDER BY purchase_date DESC, id DESC LIMIT 1);", (int(qty), int(product_id)))
         conn.commit()
 
 
@@ -701,14 +706,16 @@ def set_setting(key: str, value: Any) -> None:
 
 
 def log_visit(source: str, entered_at: datetime, left_at: datetime, reached_counter: bool, shelves: List[str],
-              picked: int, put_back: int, outcome: str) -> int:
+              picked: int, put_back: int, outcome: str, counter_from: Optional[datetime] = None,
+              counter_to: Optional[datetime] = None) -> int:
+    fmt = lambda d: d.strftime("%Y-%m-%d %H:%M:%S") if d else None
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO visits (source, entered_at, left_at, dwell_s, reached_counter, shelves, picked, put_back, outcome) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            (source, entered_at.strftime("%Y-%m-%d %H:%M:%S"), left_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "INSERT INTO visits (source, entered_at, left_at, dwell_s, reached_counter, shelves, picked, put_back, outcome, "
+            "counter_from, counter_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            (source, fmt(entered_at), fmt(left_at),
              max(0.0, (left_at - entered_at).total_seconds()), int(bool(reached_counter)), ",".join(shelves),
-             int(picked), int(put_back), outcome),
+             int(picked), int(put_back), outcome, fmt(counter_from), fmt(counter_to)),
         )
         conn.commit()
         return cur.lastrowid

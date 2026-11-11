@@ -14,14 +14,16 @@ def _h(h: int) -> str:
 def funnel_chart(b: dict) -> go.Figure:
     """Came in → stood at a shelf → reached the counter → bills."""
     steps = [("Came in", b["visitors"]), ("Stood at a shelf", b["at_shelves"]), ("Reached the counter", b["at_counter"])]
-    if b.get("bills") is not None:
+    if b.get("classified"):
+        steps.append(("Bought (bill matched)", b["bought_visits"]))
+    elif b.get("bills") is not None:
         steps.append(("Bills at the till", b["bills"]))
     if not b["visitors"]:
         return _empty("No visitors counted yet today")
     labels = [s[0] for s in steps][::-1]
     vals = [s[1] for s in steps][::-1]
     base = max(1, b["visitors"])
-    colours = [SECONDARY if l.startswith("Bills") else PRIMARY for l in labels]
+    colours = [SECONDARY if l.startswith(("Bills", "Bought")) else PRIMARY for l in labels]
     fig = go.Figure(go.Bar(
         x=vals, y=labels, orientation="h", marker_color=colours, marker_line_width=0,
         text=[f"{v}  ·  {v / base * 100:.0f}%" for v in vals], textposition="outside", cliponaxis=False,
@@ -84,3 +86,21 @@ def picks_vs_sold_chart(watched: pd.DataFrame) -> go.Figure:
                 marker_line_width=0, hovertemplate="%{y}<br>sold %{x}<extra></extra>")
     fig.update_layout(barmode="group", bargroupgap=0.05)
     return _base_layout(fig, height=60 + 52 * len(w))
+
+
+def reasons_chart(reasons: dict, words: dict) -> go.Figure:
+    """Didn't-buy reasons, largest first (unrecorded last, in grey)."""
+    if not reasons:
+        return _empty("No didn't-buy reasons recorded yet")
+    items = sorted(((k, n) for k, n in reasons.items() if k != "unknown"), key=lambda kv: kv[1])
+    if "unknown" in reasons:
+        items = [("unknown", reasons["unknown"])] + items
+    labels = [words.get(k, k) for k, _ in items]
+    vals = [n for _, n in items]
+    colours = ["#C9CED6" if k == "unknown" else SECONDARY for k, _ in items]
+    fig = go.Figure(go.Bar(x=vals, y=labels, orientation="h", marker_color=colours, marker_line_width=0,
+                           text=vals, textposition="outside", cliponaxis=False,
+                           hovertemplate="%{y}: %{x}<extra></extra>"))
+    fig.update_xaxes(visible=False, range=[0, max(vals) * 1.2])
+    fig.update_layout(showlegend=False)
+    return _base_layout(fig, height=60 + 40 * len(items))

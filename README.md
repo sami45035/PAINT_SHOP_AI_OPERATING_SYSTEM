@@ -11,6 +11,7 @@
 | **Overview** | How is the shop doing today? | L1 data · L2 dashboard |
 | **Sales Forecast** | What will sell in the next 30 days — and can I trust the forecast? | L3 |
 | **Colour Studio** | How will this shade look on the customer's wall? | L6 |
+| **Scan & Bill** | Scan the can, print the bill — stock goes down by one at the same moment. Who bought, who didn't, and why? | L1 data · L5 |
 | **Stock & Reorder** (+ Deal Checker) | What should I order, how much, and by when? Is this supplier offer worth it? | L3 |
 | **Alerts** | What needs my attention right now? | L4 |
 | **Store Camera** | How many came in, how many bought, what's on the shelves, what moves fast, did anything leave unpaid? | L5 |
@@ -119,6 +120,19 @@ To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 
 ---
 
+## Scan & Bill
+
+The billing counter, inside the app (`src/billing.py`, screen `src/ui/pages/scan_bill.py`).
+
+1. **Print labels** (expander at the bottom): an A4 PDF of QR labels, 21 per page — fast movers, chosen products or all. Each QR holds `APX:<SKU>`.
+2. **Scan** with the laptop or phone camera (QR, EAN-13, Code-128… via the browser's barcode reader, jsQR as a fallback). Each scan adds one can; the same can held in view isn't counted twice. A can's own barcode can be **linked once** to a product and then scans directly. Or add by name.
+3. **Save bill** — in one transaction: a `bills` row, one `sales` row per line, and stock goes down can by can from the batch that **expires first** (FIFO). Two counters can't both sell the last can. If the shelf has a can the system thinks is gone, the bill can still be saved (stock stops at 0, never below) — that's a count to fix.
+4. **Send on WhatsApp** — the bill as a message to the customer's number (no API needed).
+5. **Void** a wrong bill — the exact cans go back to the exact batches.
+6. **Didn't buy** — one tap with the reason. *Not in stock* asks which shade; a shade asked for twice in a week shows up in **Alerts → Lost sales**.
+
+Sales, the forecast, reorder and the camera's *who bought* all read the same tables, so one scan updates everything.
+
 ## Store Camera
 
 The camera answers five questions, each joined with the till and the stock book:
@@ -126,7 +140,7 @@ The camera answers five questions, each joined with the till and the stock book:
 | Question | How | Where |
 |---|---|---|
 | **Footfall** — how many came in, when? | Feet crossing the door line (downward = in). Only crossings through the doorway count. | Visitors & buyers |
-| **Buyers** — how many actually bought? | Bills ÷ visitors; each visit is followed to see if it reached the billing counter. Hours with many visitors and few bills are flagged with the sales they cost. | Visitors & buyers |
+| **Buyers** — how many actually bought? | Each bill saved in **Scan & Bill** is matched to the customer standing at the counter when it was saved; people who came in with them share it. A *Didn't buy* tap (price, not in stock, just asking, will come back) goes to the customer at the counter without a bill. So each visit is *bought* or *didn't buy — because…*. Without bills from the app it falls back to bills ÷ visitors. | Visitors & buyers |
 | **Theft** | A can leaves a shelf while someone stands there, and that person leaves without reaching the counter → *Left with an unpaid can* alert with a photo. Cans taken off shelves are also checked against the day's bills (*shelf vs till*). Plus after-hours movement and customers in the staff-only area. | Theft & safety, Alerts |
 | **Fast movers** | Fastest sellers from the till, plus for watched shelves how often each can is picked up and put back. *Picked up, not bought* and *demand building* are flagged. | Shelves & fast movers |
 | **Shelf stock → pre-order** | Cans counted on each shelf slot from the picture. Low shelf + cans in the store room → *Refill now*. The forecast decides what to order; for watched products the camera's pick-up trend sizes the order up or down. | Shelves & fast movers, Alerts |

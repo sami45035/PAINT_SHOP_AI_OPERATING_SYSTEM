@@ -80,3 +80,8 @@ def decode_image(data_url: str):
 
     raw = base64.b64decode(data_url.split(",", 1)[1])
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+
+
+def code_scanner(*, key: str):
+    """QR / barcode scanner in the browser. Returns {'code', 'format', 'ts'} for the latest scan, or None."""
+    return _component("code_scanner")(key=key, default=None)

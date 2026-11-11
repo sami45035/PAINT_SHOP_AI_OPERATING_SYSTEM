@@ -268,6 +268,8 @@ class Journey:
     picks: Dict[str, int] = field(default_factory=dict)          # slot id -> cans taken (net)
     put_back: int = 0
     in_staff_zone: bool = False
+    counter_from: Any = None             # first / last moment at the billing counter (datetime) — bills are matched to this
+    counter_to: Any = None
 
     @property
     def shelves(self) -> List[str]:
