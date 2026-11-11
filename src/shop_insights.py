@@ -369,21 +369,26 @@ def theft(source: str, day: Optional[date] = None, days: int = 7) -> Dict[str, A
     sec = _q("SELECT * FROM security_events WHERE COALESCE(source,'sample') = ? AND DATE(timestamp) >= ? "
              "AND timestamp <= ? ORDER BY timestamp DESC;", (source, since, now))
     start = ds + " 00:00:00"
-    # picks from the last 20 minutes are left out: that customer may still be on the way to the counter
+    # A can picked in the last 20 minutes may still be on its way to the counter: picks in that window
+    # that the till hasn't billed yet (in the same window) are given the benefit of the doubt.
     grace = (clock.now_naive() - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
-    ev = _shelf_events(source, start, min(grace, ds + " 23:59:59"))
+    ev = _shelf_events(source, start, now)
     gap = []
     if not ev.empty:
         pids = sorted(set(int(p) for p in ev["product_id"].dropna()))
-        sold = _q(f"SELECT product_id, SUM(quantity) AS sold FROM sales WHERE sale_timestamp > ? AND sale_timestamp <= ? "
-                  f"AND product_id IN ({','.join('?' * len(pids))}) GROUP BY product_id;", (start, now, *pids))
+        sold = _q(f"SELECT product_id, SUM(quantity) AS sold, SUM(CASE WHEN sale_timestamp > ? THEN quantity ELSE 0 END) "
+                  f"AS sold_recent FROM sales WHERE sale_timestamp > ? AND sale_timestamp <= ? "
+                  f"AND product_id IN ({','.join('?' * len(pids))}) GROUP BY product_id;", (grace, start, now, *pids))
         for pid, g in ev.groupby("product_id"):
-            taken = int(g.loc[g["kind"] == "pick", "qty"].sum() - g.loc[g["kind"] == "put_back", "qty"].sum())
-            s = sold[sold["product_id"] == pid]
-            n_sold = int(s["sold"].iloc[0]) if not s.empty else 0
+            net = lambda d: int(d.loc[d["kind"] == "pick", "qty"].sum() - d.loc[d["kind"] == "put_back", "qty"].sum())
+            taken, taken_recent = net(g), net(g[g["at"] > grace])
+            s_ = sold[sold["product_id"] == pid]
+            n_sold = int(s_["sold"].iloc[0]) if not s_.empty else 0
+            sold_recent = int(s_["sold_recent"].iloc[0]) if not s_.empty else 0
             if source == "demo":
-                n_sold = 0       # no till in the demo shop
-            missing = taken - n_sold
+                n_sold = sold_recent = 0       # no till in the demo shop
+            pending = max(0, taken_recent - sold_recent)
+            missing = taken - n_sold - pending
             if missing > 0:
                 r = g.iloc[0]
                 gap.append({"product_id": int(pid), "label": product_label(r), "taken": taken, "sold": n_sold,

@@ -159,13 +159,13 @@ class TestShelfMonitor(unittest.TestCase):
         self.assertEqual(self.mon.counts(), before)
 
     def test_change_needs_steady_readings(self):
-        f0, _ = self.shop.frame(1.0)
-        f1, _ = self.shop.frame(12.0)                    # B2 has one can fewer (buyer took it at 9 s)
+        f0, p0 = self.shop.frame(1.0)
+        f1, p1 = self.shop.frame(12.0)                   # B2 has one can fewer (buyer took it at 9 s)
         for _ in range(3):
-            self.mon.update(f0, [])
-        self.assertEqual(self.mon.update(f1, []), [])
-        self.assertEqual(self.mon.update(f1, []), [])
-        ch = self.mon.update(f1, [])
+            self.mon.update(f0, p0)
+        self.assertEqual(self.mon.update(f1, p1), [])
+        self.assertEqual(self.mon.update(f1, p1), [])
+        ch = self.mon.update(f1, p1)
         self.assertEqual([(s["id"], d) for s, d, _ in ch], [("B2", -1)])
 
     def test_calibration_uses_the_counts_given(self):
@@ -290,6 +290,8 @@ class TestInsights(unittest.TestCase):
             db.log_shelf_event("sample", refill["slot_id"], refill["product_id"], "restock", refill["move"],
                                at=clock.now_naive() - timedelta(seconds=1))
             after = si.shelves("sample").set_index("slot_id").loc[refill["slot_id"], "cans"]
+            with sqlite3.connect(TMP_DB) as c:       # undo, so other tests still see the low shelf
+                c.execute("DELETE FROM shelf_events WHERE id = (SELECT MAX(id) FROM shelf_events);")
             self.assertEqual(after, before + refill["move"])
 
 

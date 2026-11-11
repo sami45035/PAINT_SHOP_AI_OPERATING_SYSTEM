@@ -65,7 +65,16 @@ from src.shop_vision import (
 SNAPSHOT_DIR = DATA_DIR / "security_snapshots"
 SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}
 BLUE = (235, 140, 60)
-LOST_JOURNEY_S = 600.0     # a customer the camera lost and never saw leaving is closed after 10 minutes
+LOST_JOURNEY_S = 600.0
+
+
+def _tag(frame: np.ndarray, text: str, x: int, y: int, colour) -> None:
+    """Readable label: coloured text on a dark tag."""
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+    x = max(0, min(frame.shape[1] - tw - 8, x))
+    y = max(th + 6, y)
+    cv2.rectangle(frame, (x, y - th - 6), (x + tw + 8, y + 3), DARK, -1)
+    cv2.putText(frame, text, (x + 4, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)     # a customer the camera lost and never saw leaving is closed after 10 minutes
 
 # Colours (BGR) for overlays
 YELLOW, RED, GREEN, WHITE, DARK = (74, 192, 245), (102, 112, 249), (128, 222, 74), (255, 255, 255), (43, 32, 21)
@@ -601,11 +610,11 @@ class StoreVisionEngine:
         door = self.layout["door"]
         dx1, dx2 = int(door.get("x1", 0.0) * w), int(door.get("x2", 1.0) * w)
         cv2.line(frame, (dx1, line_y), (dx2, line_y), YELLOW, 2)
-        cv2.putText(frame, "Door line", (dx1 + 6, line_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, YELLOW, 1, cv2.LINE_AA)
+        _tag(frame, "Door line", dx1 + 4, line_y - 6, YELLOW)
         cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), BLUE, 2)
-        cv2.putText(frame, "Billing counter", (cx1 + 6, cy1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, BLUE, 1, cv2.LINE_AA)
+        _tag(frame, "Billing counter", cx1 + 2, cy1 + 18, BLUE)
         cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), RED, 2)
-        cv2.putText(frame, "Staff only", (zx1 + 6, zy1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, RED, 1, cv2.LINE_AA)
+        _tag(frame, "Staff only", zx1 + 2, zy1 + 18, RED)
         counts = self.shelves.counts()
         for s_ in self.shelves.slots:
             sx1, sy1, sx2, sy2 = to_px(s_["box"], w, h)
@@ -630,7 +639,7 @@ class StoreVisionEngine:
             if any(b == (x, y, bw, bh) for b in in_staff):
                 colour = RED
             cv2.rectangle(frame, (x, y), (x + bw, y + bh), colour, 2)
-            cv2.putText(frame, tag, (x, max(14, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
+            _tag(frame, tag, x, y - 4, colour)
 
         for (x, y, fw, fh) in faces:
             cv2.rectangle(frame, (x, y), (x + fw, y + fh), GREEN, 2)

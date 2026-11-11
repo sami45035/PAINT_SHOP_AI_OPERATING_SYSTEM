@@ -12,7 +12,7 @@
 | **Colour Studio** | How will this shade look on the customer's wall? | L6 |
 | **Stock & Reorder** (+ Deal Checker) | What should I order, how much, and by when? Is this supplier offer worth it? | L3 |
 | **Alerts** | What needs my attention right now? | L4 |
-| **Store Camera** | Who came in, and is the shop safe after closing? | L5 |
+| **Store Camera** | How many came in, how many bought, what's on the shelves, what moves fast, did anything leave unpaid? | L5 |
 | **Ask Aura** | Ask anything about the shop in plain words | L7 |
 
 ## Architecture
@@ -23,7 +23,7 @@
 | 2 · Overview | `src/ui/pages/overview.py`, `src/dashboard_views.py` | KPIs, sales trend, visitors vs bills by hour. Conversion = bills ÷ visitors for the day. |
 | 3 · Forecast & reorder | `src/predictor.py` | Seasonally-adjusted 30-day moving average: the season effect is removed from past sales, then re-applied day by day going forward (a festival ending on 15 Nov only boosts demand until 15 Nov). Order quantity respects supplier lead time and minimum order. |
 | 4 · Alerts | `src/smart_alerts.py` | Running out before the supplier can deliver, batches expiring within 45 days, money stuck in slow sellers, days with many visitors but few bills. |
-| 5 · Store Camera | `src/camera_stream.py` | Laptop webcam or ESP32-CAM. HOG person detection, line-crossing door counts, after-hours motion guard and staff-only zone, one saved alert per minute with a photo. A clearly-labelled demo feed that never writes to the database. |
+| 5 · Store Camera | `src/camera_stream.py`, `src/shop_vision.py`, `src/shop_insights.py` | The camera as a data source. People detection (HOG) and tracking; door-line footfall; each customer's journey (shelves visited, cans taken / put back, reached the counter); can counting on shelf slots; walk-out (unpaid can) alerts; insights that join all of it with sales, stock and the forecast. |
 | 6 · Colour Studio | `src/colour_studio/` | SegFormer (ADE20K) via ONNX Runtime finds walls and separates them from ceiling, doors, windows and furniture; walls are split at corners; light-preserving recolouring in linear RGB; room-aware shade suggestions; paint quantity planner. |
 | 7 · Ask Aura | `src/ai_assistant.py` | Gemini (optional) grounded in live shop data, with an offline mode for common questions. |
 
@@ -93,14 +93,30 @@ To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 
 ---
 
-## Store Camera setup
+## Store Camera
 
-- **Webcam:** when the app runs on your laptop, the server reads the webcam directly (about 8 frames a second). On Streamlit Cloud the server can't reach your camera, so the screen switches to **Browser camera**: press **Start camera**, allow access, and the browser shows the live video and sends a small still about twice a second for counting. Works on a laptop or phone (pick the camera from the list if there are several). Keep the tab open while counting.
-- **ESP32-CAM:** flash the CameraWebServer example, join the shop Wi-Fi, then put the stream address (e.g. `http://192.168.1.100:81/stream`) in **Settings** in the sidebar.
-- Door line and staff-only zone can be adjusted on the Store Camera screen. Put the door line where people's **feet** cross the doorway; the camera should see whole people walking through.
-- The camera is read continuously in the background (about 8 frames a second) while the app is open; the screen refreshes every 2 seconds. A person is counted once going in and once going out — standing on the line doesn't add counts, and someone close to the camera with their feet out of view isn't counted (they still show under **In view**).
-- **Came in / Left** on this screen are what the camera counted today. The sample visitor numbers on Overview are separate.
-- Alert photos are saved to `data/security_snapshots/`.
+The camera answers five questions, each joined with the till and the stock book:
+
+| Question | How | Where |
+|---|---|---|
+| **Footfall** — how many came in, when? | Feet crossing the door line (downward = in). Only crossings through the doorway count. | Visitors & buyers |
+| **Buyers** — how many actually bought? | Bills ÷ visitors; each visit is followed to see if it reached the billing counter. Hours with many visitors and few bills are flagged with the sales they cost. | Visitors & buyers |
+| **Theft** | A can leaves a shelf while someone stands there, and that person leaves without reaching the counter → *Left with an unpaid can* alert with a photo. Cans taken off shelves are also checked against the day's bills (*shelf vs till*). Plus after-hours movement and customers in the staff-only area. | Theft & safety, Alerts |
+| **Fast movers** | Fastest sellers from the till, plus for watched shelves how often each can is picked up and put back. *Picked up, not bought* and *demand building* are flagged. | Shelves & fast movers |
+| **Shelf stock → pre-order** | Cans counted on each shelf slot from the picture. Low shelf + cans in the store room → *Refill now*. The forecast decides what to order; for watched products the camera's pick-up trend sizes the order up or down. | Shelves & fast movers, Alerts |
+
+**Data sources.** Rows are tagged `camera` (a real camera), `demo` (the drawn demo shop) or `sample` (30 days of history built to match the sample sales, so the screens show something on day one). Demo numbers never count as real visitors. `python data/seed_camera.py` adds the sample history to an older database.
+
+**Demo shop.** A drawn shop on a 64-second loop, read by the same code as a real camera: a buyer, a browser who puts a can back, a walk-out (alert), an enquiry, and staff refilling shelves from the store room (staff aren't counted as visitors).
+
+**Set up a real camera** (Set up tab): tap two points for the door line, two corners for the billing counter and the staff-only area, and two corners around each shelf slot (one product per slot, cans side by side facing the camera). Save, then **Calibrate** with the shelves as they are.
+
+**Where the camera is read**
+- **Webcam, app running on your laptop:** the app reads it directly (~8 frames a second).
+- **Webcam, app on Streamlit Cloud:** the browser streams it — press **Start camera** and allow access (~2 frames a second; keep the tab open).
+- **ESP32-CAM:** flash the CameraWebServer example, join the shop Wi-Fi, put the stream address (e.g. `http://192.168.1.100:81/stream`) in **Settings**. The ESP32 must be reachable from where the app runs (so run the app on a laptop or mini PC in the shop).
+
+Alert photos are saved to `data/security_snapshots/`.
 
 ## Gemini (optional)
 
