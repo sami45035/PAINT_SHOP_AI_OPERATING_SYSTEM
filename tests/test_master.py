@@ -19,6 +19,26 @@ from src import database as db
 from src.config import DB_PATH, SAMPLE_ROOMS_DIR, SHADES_CATALOG_PATH
 
 
+_DB_PATCH = None
+
+
+def setUpModule():
+    """Work on a copy of the sample database, moved forward to today like the app does."""
+    global DB_PATH, _DB_PATCH
+    tmp = Path(tempfile.mkdtemp()) / "paint_shop.db"
+    shutil.copy(DB_PATH, tmp)
+    DB_PATH = tmp
+    _DB_PATCH = mock.patch.object(db, "DB_PATH", tmp)
+    _DB_PATCH.start()
+    db.ensure_app_tables()
+    db.ensure_demo_dates_current()
+
+
+def tearDownModule():
+    if _DB_PATCH is not None:
+        _DB_PATCH.stop()
+
+
 def _sample_room(name="master_bedroom.jpg"):
     import cv2
 

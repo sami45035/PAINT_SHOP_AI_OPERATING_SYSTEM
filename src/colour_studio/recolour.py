@@ -35,36 +35,38 @@ def _luminance(lin_rgb: np.ndarray) -> np.ndarray:
     return lin_rgb[..., 0] * 0.2126 + lin_rgb[..., 1] * 0.7152 + lin_rgb[..., 2] * 0.0722
 
 
-def recolour(image_rgb: np.ndarray, alpha: np.ndarray, paint_hex: str, keep_texture: float = 1.0) -> np.ndarray:
+def light_map(image_rgb: np.ndarray, ref_alpha: np.ndarray, keep_texture: float = 1.0) -> np.ndarray:
     """
-    Paint the area given by `alpha` (float 0..1, same height/width as the image).
-
-    keep_texture: 1.0 keeps all of the photo's light and texture; lower values
-    flatten it toward a solid colour (useful for very patterned old walls).
+    How much light falls on each pixel, relative to the typical brightness of
+    the chosen walls (1.0 = an ordinary bit of wall). Computed once per photo
+    and wall choice; every shade then reuses it.
     """
-    if alpha.shape[:2] != image_rgb.shape[:2]:
-        alpha = cv2.resize(alpha.astype(np.float32), (image_rgb.shape[1], image_rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
-    a = np.clip(alpha.astype(np.float32), 0.0, 1.0)
-    if a.max() <= 0:
-        return image_rgb.copy()
-
+    if ref_alpha.shape[:2] != image_rgb.shape[:2]:
+        ref_alpha = cv2.resize(ref_alpha.astype(np.float32), (image_rgb.shape[1], image_rgb.shape[0]),
+                               interpolation=cv2.INTER_LINEAR)
+    a = np.clip(ref_alpha.astype(np.float32), 0.0, 1.0)
     lin = srgb_to_linear(image_rgb.astype(np.float32) / 255.0)
     Y = _luminance(lin)
-
     # Typical wall brightness: median of clearly-selected pixels (robust to lamps and dark corners)
     core = a > 0.6
-    ref = float(np.median(Y[core])) if core.any() else float(np.average(Y, weights=a + 1e-6))
+    if core.any():
+        ref = float(np.median(Y[core]))
+    elif a.max() > 0:
+        ref = float(np.average(Y, weights=a + 1e-6))
+    else:
+        ref = float(np.median(Y))
     ref = max(ref, 1e-4)
-
     light = (Y / ref).astype(np.float32)
     # Very fine noise (JPEG blocks) adds grain to dark paints — smooth the light map a touch
     light = cv2.bilateralFilter(light, 5, 0.08, 3)
     light = 1.0 + (light - 1.0) * keep_texture
-    light = np.clip(light, 0.0, 2.5)
+    return np.clip(light, 0.0, 2.5)
 
+
+def paint_layer(light: np.ndarray, paint_hex: str) -> np.ndarray:
+    """The whole photo as if every surface had this paint (blend it in with a mask)."""
     paint_lin = srgb_to_linear(np.array(hex_to_rgb(paint_hex), dtype=np.float32) / 255.0)
     painted_lin = light[..., None] * paint_lin[None, None, :]
-
     # Bright spots: instead of clipping each channel (which shifts the hue), fade
     # toward white the way a real over-lit wall does.
     peak = painted_lin.max(axis=2, keepdims=True)
@@ -74,11 +76,29 @@ def recolour(image_rgb: np.ndarray, alpha: np.ndarray, paint_hex: str, keep_text
         t = 1.0 - 1.0 / safe_peak
         rolled = (painted_lin / safe_peak) * (1.0 - t) + t
         painted_lin = np.where(over, rolled, painted_lin)
-    painted_lin = np.clip(painted_lin, 0.0, 1.0)
+    painted = linear_to_srgb(np.clip(painted_lin, 0.0, 1.0)) * 255.0
+    return np.clip(painted + 0.5, 0, 255).astype(np.uint8)
 
-    painted = linear_to_srgb(painted_lin) * 255.0
-    out = painted * a[..., None] + image_rgb.astype(np.float32) * (1.0 - a[..., None])
+
+def blend(image_rgb: np.ndarray, painted: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    a = np.clip(alpha.astype(np.float32), 0.0, 1.0)[..., None]
+    out = painted.astype(np.float32) * a + image_rgb.astype(np.float32) * (1.0 - a)
     return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+
+def recolour(image_rgb: np.ndarray, alpha: np.ndarray, paint_hex: str, keep_texture: float = 1.0) -> np.ndarray:
+    """
+    Paint the area given by `alpha` (float 0..1, same height/width as the image).
+
+    keep_texture: 1.0 keeps all of the photo's light and texture; lower values
+    flatten it toward a solid colour (useful for very patterned old walls).
+    """
+    if alpha.shape[:2] != image_rgb.shape[:2]:
+        alpha = cv2.resize(alpha.astype(np.float32), (image_rgb.shape[1], image_rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+    if alpha.max() <= 0:
+        return image_rgb.copy()
+    light = light_map(image_rgb, alpha, keep_texture)
+    return blend(image_rgb, paint_layer(light, paint_hex), alpha)
 
 
 def side_by_side(before: np.ndarray, after: np.ndarray, gap: int = 8) -> np.ndarray:

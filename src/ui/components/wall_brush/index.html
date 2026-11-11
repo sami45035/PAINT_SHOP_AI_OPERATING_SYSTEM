@@ -1,0 +1,356 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --teal:#0B6E79; --ink:#15202B; --slate:#5A6472; --line:#E2E5EA; --wash:#E2F0F1; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:transparent; font-family: Inter, system-ui, -apple-system, sans-serif; color:var(--ink); }
+  .bar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; font-size:13px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; }
+  .seg button { border:0; background:#fff; padding:7px 10px; font:inherit; font-weight:600; color:var(--slate); cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button.on { background:var(--teal); color:#fff; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:7px 9px; font:inherit; font-weight:600; color:var(--ink); cursor:pointer; display:inline-flex; align-items:center; gap:6px; user-select:none; }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .btn.hold:active { background:var(--wash); }
+  .size { display:inline-flex; align-items:center; gap:8px; padding:4px 10px; border:1px solid var(--line); border-radius:10px; background:#fff; }
+  .size input[type=range] { width:96px; accent-color:var(--teal); }
+  .dot { border-radius:50%; background:var(--ink); display:inline-block; flex:none; }
+  .dotbox { width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; }
+  .chk { display:inline-flex; align-items:center; gap:6px; color:var(--slate); cursor:pointer; }
+  .chk input { accent-color:var(--teal); }
+  .spacer { flex:1; }
+  .stage { position:relative; width:100%; border-radius:10px; overflow:hidden; line-height:0; background:#26313C; touch-action:none; }
+  canvas { width:100%; height:auto; display:block; }
+  #view { cursor:none; }
+  #cursor { position:absolute; inset:0; pointer-events:none; }
+  .hint { font-size:12px; color:var(--slate); margin-top:6px; }
+  .loading { color:#C9CED6; padding:120px 0; text-align:center; line-height:1.4; font-size:14px; }
+  svg { width:16px; height:16px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="seg" role="group" aria-label="Tool">
+    <button id="tPaint" class="on" title="Paint (B)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4-4 10.4-8.4z"/><path d="M8 11c-2.2 0-4 1.8-4 4 0 1.5-.8 3-2 4 1 .6 2.5 1 4 1 3.3 0 6-2.7 6-6"/></svg>
+      Paint</button>
+    <button id="tErase" title="Erase (E)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L11 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
+      Erase</button>
+  </div>
+  <label class="size" title="Brush size ( [ and ] keys )">
+    <span class="dotbox"><span id="sizeDot" class="dot"></span></span>
+    <input id="size" type="range" min="4" max="140" value="36">
+    <span id="sizeVal" style="width:40px;font-variant-numeric:tabular-nums">36 px</span>
+  </label>
+  <label class="chk" title="Only paint pixels that look like the spot where the stroke started — keeps paint off the headboard, frames and ceiling"><input id="smart" type="checkbox"> Stop at edges</label>
+  <span class="spacer"></span>
+  <button id="undo" class="btn" disabled title="Undo (Ctrl+Z)">↶ Undo</button>
+  <button id="clear" class="btn" disabled title="Remove all brush touch-ups">Clear</button>
+  <button id="compare" class="btn hold" title="Hold to see the original photo">👁 Compare</button>
+</div>
+<div class="stage" id="stage">
+  <div class="loading" id="loading">Loading photo…</div>
+  <canvas id="view" style="display:none"></canvas>
+  <canvas id="cursor" style="display:none"></canvas>
+</div>
+<div class="hint" id="hint">Brush over unpainted patches to paint them · switch to Erase to take paint off the headboard, ceiling or furniture.</div>
+
+<script>
+(function () {
+  // ---------- Streamlit component protocol (no build step needed) ----------
+  function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
+  function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+  function setValue(v) { send("streamlit:setComponentValue", { value: v, dataType: "json" }); }
+
+  // ---------- state ----------
+  var W = 0, H = 0;
+  var orig = null, paint = null, base = null;   // Uint8ClampedArray RGBA, RGBA, Uint8 (0..255)
+  var add = null, erase = null;                  // Uint8Array per pixel (0..255)
+  var out = null, outImg = null;                 // composite buffer
+  var key = null, resetTok = null, paintSrc = null, baseSrc = null;
+  var tool = "paint", size = 36, smart = false, comparing = false;
+  var undoStack = [], strokes = 0;
+  var drawing = false, last = null, refColour = null, sendTimer = null;
+  var view = document.getElementById("view"), cur = document.getElementById("cursor");
+  var vctx = view.getContext("2d"), cctx = cur.getContext("2d");
+  var hover = null;
+
+  // ---------- helpers ----------
+  function loadImage(src) {
+    return new Promise(function (ok, bad) {
+      var im = new Image();
+      im.onload = function () { ok(im); };
+      im.onerror = bad;
+      im.src = src;
+    });
+  }
+  function pixels(im) {
+    var c = document.createElement("canvas"); c.width = W; c.height = H;
+    var x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(im, 0, 0, W, H);
+    return x.getImageData(0, 0, W, H).data;
+  }
+  function alphaAt(i) {
+    var b = base[i] * (255 - erase[i]) / 255;
+    return Math.max(b, add[i]) / 255;
+  }
+  function compose(x0, y0, x1, y1) {
+    x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+    x1 = Math.min(W, Math.ceil(x1)); y1 = Math.min(H, Math.ceil(y1));
+    if (x1 <= x0 || y1 <= y0) return;
+    var d = outImg.data, src = comparing ? null : paint;
+    for (var y = y0; y < y1; y++) {
+      for (var x = x0; x < x1; x++) {
+        var i = y * W + x, p = i * 4;
+        if (comparing) { d[p] = orig[p]; d[p + 1] = orig[p + 1]; d[p + 2] = orig[p + 2]; d[p + 3] = 255; continue; }
+        var a = alphaAt(i), ia = 1 - a;
+        d[p] = orig[p] * ia + src[p] * a;
+        d[p + 1] = orig[p + 1] * ia + src[p + 1] * a;
+        d[p + 2] = orig[p + 2] * ia + src[p + 2] * a;
+        d[p + 3] = 255;
+      }
+    }
+    vctx.putImageData(outImg, 0, 0, x0, y0, x1 - x0, y1 - y0);
+  }
+  function composeAll() { compose(0, 0, W, H); }
+
+  function scale() { var r = view.getBoundingClientRect(); return r.width ? W / r.width : 1; }
+  function toImage(e) {
+    var r = view.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+  }
+  function colourAt(x, y) {
+    var xi = Math.min(W - 1, Math.max(0, Math.round(x))), yi = Math.min(H - 1, Math.max(0, Math.round(y)));
+    // average a small patch so JPEG noise doesn't decide
+    var r = 0, g = 0, b = 0, n = 0;
+    for (var dy = -2; dy <= 2; dy++) for (var dx = -2; dx <= 2; dx++) {
+      var xx = Math.min(W - 1, Math.max(0, xi + dx)), yy = Math.min(H - 1, Math.max(0, yi + dy)), p = (yy * W + xx) * 4;
+      r += orig[p]; g += orig[p + 1]; b += orig[p + 2]; n++;
+    }
+    return [r / n, g / n, b / n];
+  }
+
+  // ---------- painting ----------
+  function stamp(cx, cy) {
+    var r = size / 2, r2 = r * r, hard = 0.65;
+    var x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W, Math.ceil(cx + r + 1));
+    var y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H, Math.ceil(cy + r + 1));
+    for (var y = y0; y < y1; y++) {
+      for (var x = x0; x < x1; x++) {
+        var dx = x - cx, dy = y - cy, dd = dx * dx + dy * dy;
+        if (dd > r2) continue;
+        var t = Math.sqrt(dd) / r;
+        var s = t <= hard ? 1 : 1 - (t - hard) / (1 - hard);
+        s = s * s * (3 - 2 * s);
+        var i = y * W + x;
+        if (smart && refColour) {
+          var p = i * 4;
+          var dr = orig[p] - refColour[0], dg = orig[p + 1] - refColour[1], db = orig[p + 2] - refColour[2];
+          var dist = Math.sqrt(0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db);
+          if (dist > 34) continue;
+          if (dist > 22) s *= (34 - dist) / 12;
+        }
+        var v = Math.round(s * 255);
+        if (tool === "paint") {
+          if (v > add[i]) add[i] = v;
+          erase[i] = Math.round(erase[i] * (1 - s));
+        } else {
+          if (v > erase[i]) erase[i] = v;
+          add[i] = Math.round(add[i] * (1 - s));
+        }
+      }
+    }
+    compose(x0, y0, x1, y1);
+  }
+  function strokeTo(p) {
+    if (!last) { stamp(p.x, p.y); last = p; return; }
+    var dx = p.x - last.x, dy = p.y - last.y, dist = Math.hypot(dx, dy), step = Math.max(1, size / 6);
+    var n = Math.ceil(dist / step);
+    for (var k = 1; k <= n; k++) stamp(last.x + dx * k / n, last.y + dy * k / n);
+    last = p;
+  }
+
+  // ---------- cursor ----------
+  function drawCursor() {
+    cctx.clearRect(0, 0, W, H);
+    if (!hover || comparing) return;
+    var k = scale(), r = size / 2;
+    cctx.lineWidth = 3 * k; cctx.strokeStyle = "rgba(0,0,0,0.55)";
+    cctx.beginPath(); cctx.arc(hover.x, hover.y, r, 0, Math.PI * 2); cctx.stroke();
+    cctx.lineWidth = 1.5 * k; cctx.strokeStyle = tool === "paint" ? "#FFFFFF" : "#FFD7D2";
+    if (tool === "erase") cctx.setLineDash([5 * k, 4 * k]);
+    cctx.beginPath(); cctx.arc(hover.x, hover.y, r, 0, Math.PI * 2); cctx.stroke();
+    cctx.setLineDash([]);
+    // centre dot
+    cctx.fillStyle = "#fff"; cctx.beginPath(); cctx.arc(hover.x, hover.y, 1.6 * k, 0, Math.PI * 2); cctx.fill();
+    // tool badge beside the ring so you always know what you're holding
+    var bx = hover.x + r * 0.72 + 4 * k, by = hover.y - r * 0.72 - 4 * k, br = 11 * k;
+    cctx.fillStyle = tool === "paint" ? "#0B6E79" : "#B42318";
+    cctx.beginPath(); cctx.arc(bx, by, br, 0, Math.PI * 2); cctx.fill();
+    cctx.font = Math.round(13 * k) + "px sans-serif"; cctx.textAlign = "center"; cctx.textBaseline = "middle";
+    cctx.fillText(tool === "paint" ? "🖌️" : "🧽", bx, by + 1 * k);
+  }
+
+  // ---------- value back to Python ----------
+  function queueSend() {
+    clearTimeout(sendTimer);
+    sendTimer = setTimeout(sendEdits, 650);
+  }
+  function sendEdits() {
+    var c = document.createElement("canvas"); c.width = W; c.height = H;
+    var x = c.getContext("2d"), im = x.createImageData(W, H), d = im.data, any = false;
+    for (var i = 0, p = 0; i < W * H; i++, p += 4) {
+      d[p] = add[i]; d[p + 1] = erase[i]; d[p + 2] = 0; d[p + 3] = 255;
+      if (add[i] || erase[i]) any = true;
+    }
+    x.putImageData(im, 0, 0);
+    setValue({ key: key, edits: any ? c.toDataURL("image/png") : "", strokes: strokes, ts: Date.now() });
+  }
+  function refreshButtons() {
+    document.getElementById("undo").disabled = undoStack.length === 0;
+    var any = false;
+    if (add) for (var i = 0; i < add.length; i += 7) { if (add[i] || erase[i]) { any = true; break; } }
+    document.getElementById("clear").disabled = !any && strokes === 0;
+  }
+  function pushUndo() {
+    undoStack.push([add.slice(), erase.slice()]);
+    if (undoStack.length > 30) undoStack.shift();
+  }
+
+  // ---------- events ----------
+  view.addEventListener("pointerdown", function (e) {
+    if (!orig) return;
+    e.preventDefault();
+    view.setPointerCapture(e.pointerId);
+    pushUndo();
+    drawing = true; last = null;
+    var p = toImage(e);
+    refColour = smart ? colourAt(p.x, p.y) : null;
+    strokeTo(p);
+    hover = p; drawCursor();
+  });
+  view.addEventListener("pointermove", function (e) {
+    if (!orig) return;
+    var p = toImage(e);
+    hover = p;
+    if (drawing) {
+      var evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+      for (var k = 0; k < evs.length; k++) strokeTo(toImage(evs[k]));
+    }
+    drawCursor();
+  });
+  function endStroke() {
+    if (!drawing) return;
+    drawing = false; last = null; strokes++;
+    refreshButtons(); queueSend();
+  }
+  view.addEventListener("pointerup", endStroke);
+  view.addEventListener("pointercancel", endStroke);
+  view.addEventListener("pointerleave", function () { hover = null; drawCursor(); });
+  view.addEventListener("wheel", function (e) {
+    if (!e.altKey && !e.ctrlKey) return;            // Alt/Ctrl + wheel resizes; plain wheel scrolls the page
+    e.preventDefault();
+    setSize(size + (e.deltaY < 0 ? 4 : -4));
+  }, { passive: false });
+
+  function setTool(t) {
+    tool = t;
+    document.getElementById("tPaint").classList.toggle("on", t === "paint");
+    document.getElementById("tErase").classList.toggle("on", t === "erase");
+    drawCursor();
+  }
+  function setSize(v) {
+    size = Math.max(4, Math.min(140, Math.round(v)));
+    document.getElementById("size").value = size;
+    document.getElementById("sizeVal").textContent = size + " px";
+    var shown = Math.max(3, Math.min(24, size / 140 * 24));
+    var dot = document.getElementById("sizeDot"); dot.style.width = shown + "px"; dot.style.height = shown + "px";
+    drawCursor();
+  }
+  document.getElementById("tPaint").onclick = function () { setTool("paint"); };
+  document.getElementById("tErase").onclick = function () { setTool("erase"); };
+  document.getElementById("size").oninput = function (e) { setSize(+e.target.value); };
+  document.getElementById("smart").onchange = function (e) { smart = e.target.checked; };
+  document.getElementById("undo").onclick = function () {
+    if (!undoStack.length) return;
+    var s = undoStack.pop(); add = s[0]; erase = s[1];
+    strokes++; composeAll(); refreshButtons(); queueSend();
+  };
+  document.getElementById("clear").onclick = function () {
+    pushUndo();
+    add.fill(0); erase.fill(0); strokes++;
+    composeAll(); refreshButtons(); queueSend();
+  };
+  var cmp = document.getElementById("compare");
+  function cmpOn(e) { e.preventDefault(); if (!orig) return; comparing = true; composeAll(); drawCursor(); }
+  function cmpOff() { if (!comparing) return; comparing = false; composeAll(); drawCursor(); }
+  cmp.addEventListener("pointerdown", cmpOn);
+  cmp.addEventListener("pointerup", cmpOff);
+  cmp.addEventListener("pointerleave", cmpOff);
+  window.addEventListener("keydown", function (e) {
+    if (e.target && e.target.tagName === "INPUT" && e.target.type !== "range" && e.target.type !== "checkbox") return;
+    if (e.key === "b" || e.key === "B") setTool("paint");
+    else if (e.key === "e" || e.key === "E") setTool("erase");
+    else if (e.key === "[") setSize(size - 4);
+    else if (e.key === "]") setSize(size + 4);
+    else if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) { e.preventDefault(); document.getElementById("undo").click(); }
+  });
+  window.addEventListener("resize", function () { drawCursor(); setHeight(); });
+
+  // ---------- data from Python ----------
+  async function onRender(args) {
+    var newPhoto = args.photo !== key || args.reset !== resetTok;
+    try {
+      if (newPhoto) {
+        var ims = await Promise.all([loadImage(args.orig), loadImage(args.painted), loadImage(args.base)]);
+        W = args.width; H = args.height;
+        view.width = cur.width = W; view.height = cur.height = H;
+        outImg = vctx.createImageData(W, H);
+        orig = pixels(ims[0]); paint = pixels(ims[1]);
+        var b = pixels(ims[2]); base = new Uint8Array(W * H);
+        for (var i = 0; i < W * H; i++) base[i] = b[i * 4];
+        add = new Uint8Array(W * H); erase = new Uint8Array(W * H);
+        if (args.edits) {
+          var e = pixels(await loadImage(args.edits));
+          for (var j = 0; j < W * H; j++) { add[j] = e[j * 4]; erase[j] = e[j * 4 + 1]; }
+        }
+        undoStack = []; strokes = 0;
+        key = args.photo; resetTok = args.reset; paintSrc = args.painted; baseSrc = args.base;
+        document.getElementById("loading").style.display = "none";
+        view.style.display = "block"; cur.style.display = "block";
+        if (args.size) setSize(args.size);
+        composeAll(); refreshButtons();
+      } else {
+        var changed = false;
+        if (args.painted !== paintSrc) { paint = pixels(await loadImage(args.painted)); paintSrc = args.painted; changed = true; }
+        if (args.base !== baseSrc) {
+          var bb = pixels(await loadImage(args.base));
+          for (var k = 0; k < W * H; k++) base[k] = bb[k * 4];
+          baseSrc = args.base; changed = true;
+        }
+        if (changed) composeAll();
+      }
+    } catch (err) {
+      document.getElementById("loading").textContent = "Couldn't load the photo for touch-ups.";
+    }
+    setHeight();
+  }
+
+  var chain = Promise.resolve();   // handle one render at a time (photo loads are async)
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (d && d.type === "streamlit:render") {
+      var a = d.args || {};
+      chain = chain.then(function () { return onRender(a); });
+    }
+  });
+  setSize(36);
+  send("streamlit:componentReady", { apiVersion: 1 });
+  setHeight();
+})();
+</script>
+</body>
+</html>

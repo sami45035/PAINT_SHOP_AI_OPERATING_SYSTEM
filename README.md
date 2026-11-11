@@ -73,8 +73,13 @@ The model predicts on a coarse grid, so its raw wall map has holes at lamp glow,
 
 Walls are then split at corners and named from perspective (flat ceiling line = back wall, sloping = left/right).
 
-### Fixing a spot by hand
-Under **Pick a wall**, switch **Tap the photo to** → *Add a missed spot* or *Remove a spot*, then tap the patch. **Undo fix** / **Clear fixes** are next to it.
+### Touching up by hand
+Switch **Pick a wall** to **Touch up with brush**. The brush runs in the browser, so paint appears as you move:
+- **Paint** covers patches the wall finder missed (lamp glare, corners); **Erase** takes paint off the headboard, ceiling or lamps.
+- The size slider (or `[` / `]`, or Alt + scroll) sets the brush size; the round cursor shows exactly what it will cover.
+- **Stop at edges** only paints pixels that look like the spot where the stroke started — handy along a headboard or frame.
+- **Undo** (Ctrl+Z), **Clear**, and hold **👁 Compare** to see the original photo.
+Touch-ups stay when you change the shade or the walls, and are used for the shade ideas, the paint amount and the saved before/after.
 
 ### If a photo still comes out wrong
 ```powershell

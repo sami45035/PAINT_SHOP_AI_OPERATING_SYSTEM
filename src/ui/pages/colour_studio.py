@@ -11,10 +11,11 @@ from PIL import Image, ImageOps
 from src.colour_assistant import find_nearest_shades_by_hex, search_shades_by_query
 from src.colour_studio import segmentation as seg
 from src.colour_studio.quantity import best_packs, describe_packs, litres_needed
-from src.colour_studio.recolour import outline_overlay, recolour, side_by_side
+from src.colour_studio.recolour import blend, light_map, outline_overlay, paint_layer, side_by_side
 from src.colour_studio.recommend import current_wall_colour, recommend_shades, room_palette
 from src.config import SAMPLE_ROOMS_DIR
 from src.formatting import pack, rupees
+from src.ui.components import apply_edits, decode_edits, to_data_url, wall_brush
 from src.ui.theme import chip, html, page_header, show_image, show_table, step
 
 try:
@@ -25,7 +26,7 @@ except ImportError:  # pragma: no cover - optional dependency
     HAS_CLICK = False
 
 SAMPLES = {"Bedroom": "master_bedroom.jpg", "Living room": "modern_living_room.jpg", "Dining room": "cozy_dining_room.jpg"}
-TAP_MODES = ["Pick walls", "Add a missed spot", "Remove a spot"]
+VIEW_MODES = ["Pick walls", "Touch up with brush"]
 DISPLAY_W = 820
 TEAL_RGB = (11, 110, 121)
 SS = st.session_state
@@ -91,9 +92,25 @@ def _reset_for(img_id: str) -> None:
         SS["cs_taps"] = []
         SS["cs_sel"] = None          # None = pick a sensible default
         SS["cs_last_click"] = None
-        SS["cs_render_cache"] = {}
-        SS["cs_fixes"] = []          # manual "add/remove a spot" taps for this photo
-        SS["cs_tap_mode"] = TAP_MODES[0]
+        SS["cs_cache"] = {}          # everything computed for this photo (see _memo)
+        SS["cs_edits_url"] = ""      # brush touch-ups (PNG: red = painted, green = erased)
+        SS["cs_edits"] = None
+        SS["cs_edits_ts"] = 0
+        SS["cs_brush_reset"] = SS.get("cs_brush_reset", 0) + 1
+        SS["cs_view"] = VIEW_MODES[0]
+
+
+def _memo(key, fn, keep: int = 24):
+    """Small per-photo cache, so a click never recomputes what it didn't change."""
+    cache: Dict = SS.setdefault("cs_cache", {})
+    if key in cache:
+        cache[key] = cache.pop(key)      # mark as recently used
+        return cache[key]
+    val = fn()
+    cache[key] = val
+    while len(cache) > keep:
+        cache.pop(next(iter(cache)))
+    return val
 
 
 # ------------------------------------------------------------------ segmentation
@@ -112,15 +129,7 @@ def _segmentation(img_id: str, image: np.ndarray, segmenter) -> seg.Segmentation
             cache.clear()
             cache[key] = seg.tap_result(image, SS.get("cs_taps", []))
         base = cache[key]
-    fixes = tuple(SS.get("cs_fixes", []))
-    if not fixes:
-        return base
-    fkey = (key, fixes)
-    fcache: Dict = SS.setdefault("cs_fix_cache", {})
-    if fkey not in fcache:
-        fcache.clear()
-        fcache[fkey] = seg.apply_fixes(base, list(fixes), SS.get("cs_sel") or [])
-    return fcache[fkey]
+    return base
 
 
 def _default_selection(result: seg.SegmentationResult) -> List[int]:
@@ -142,12 +151,6 @@ def _handle_click(click, result: seg.SegmentationResult, shown_w: int, shown_h: 
     w = click.get("width") or shown_w
     h = click.get("height") or shown_h
     x, y = click["x"] / w, click["y"] / h
-    mode = SS.get("cs_tap_mode", TAP_MODES[0])
-    if mode != TAP_MODES[0]:
-        op = "add" if mode == TAP_MODES[1] else "remove"
-        SS.setdefault("cs_fixes", []).append((op, round(x, 4), round(y, 4)))
-        SS["cs_render_cache"] = {}
-        st.rerun()
     region = result.region_at(x, y)
     sel = set(SS.get("cs_sel") or [])
     if region is not None:
@@ -162,7 +165,7 @@ def _handle_click(click, result: seg.SegmentationResult, shown_w: int, shown_h: 
 # ------------------------------------------------------------------ shades
 def _set_shade(shade: dict) -> None:
     SS["cs_shade"] = shade
-    SS["cs_force_after"] = True   # switch the Before/After toggle on the next run
+    SS["cs_force_after"] = True   # switch "Show the new colour" back on for the next run
 
 
 def _stock_chip(shade: dict) -> str:
@@ -196,6 +199,83 @@ def _shade_list(shades: List[dict], key: str, reason_key: str = "reason") -> Non
                     st.rerun()
 
 
+# ------------------------------------------------------------------ cached pieces
+def _recommendations(result: seg.SegmentationResult, alpha: np.ndarray, mood: str):
+    palette = room_palette(result.image, result.label_map, result.id2label, alpha > 0.5)
+    wall_now = current_wall_colour(result.image, alpha)
+    return palette, wall_now, recommend_shades(palette, wall_now, mood, limit=5)
+
+
+def _painted(result: seg.SegmentationResult, sel: tuple, hex_code: str, base_alpha: np.ndarray) -> np.ndarray:
+    """The whole photo in this paint, lit like the chosen walls (light map shared by every shade)."""
+    light = _memo(("light", sel), lambda: light_map(result.image, base_alpha))
+    return _memo(("painted", sel, hex_code), lambda: paint_layer(light, hex_code))
+
+
+def _after(result, sel, ets, hex_code, base_alpha, alpha) -> np.ndarray:
+    return _memo(("after", sel, ets, hex_code),
+                 lambda: blend(result.image, _painted(result, sel, hex_code, base_alpha), alpha))
+
+
+def _pick_view(img_id, result: seg.SegmentationResult, alpha, sel, ets, shade) -> None:
+    if SS.pop("cs_force_after", False) or "cs_show_after" not in SS:
+        SS["cs_show_after"] = True
+    show_after = st.toggle("Show the new colour", key="cs_show_after")
+    if show_after and shade and sel:
+        base_alpha = _memo(("base_alpha", sel), lambda: result.selection_alpha(list(sel)))
+        shown = _after(result, sel, ets, shade["hex_code"], base_alpha, alpha)
+        tag = ("after", sel, ets, shade["hex_code"])
+    else:
+        shown = _memo(("outline", sel), lambda: outline_overlay(
+            result.image, [(r.mask, TEAL_RGB, 0.28 if r.id in sel else 0.0) for r in result.regions], thickness=2))
+        tag = ("outline", sel)
+    h, w = shown.shape[:2]
+    disp_h = int(h * DISPLAY_W / w)
+    pil = _memo(("display",) + tag, lambda: Image.fromarray(shown).resize((DISPLAY_W, disp_h), Image.LANCZOS))
+    if HAS_CLICK:
+        click = streamlit_image_coordinates(pil, key=f"cs_click_{img_id}")
+        _handle_click(click, result, DISPLAY_W, disp_h)
+    else:
+        show_image(pil)
+        st.caption("Install `streamlit-image-coordinates` to pick walls by tapping the photo.")
+
+    touched = " · brush touch-ups applied" if SS.get("cs_edits") is not None else ""
+    if result.method == "model":
+        msg = (f"<b>{len(result.regions)} wall{'s' if len(result.regions) != 1 else ''} found</b> in "
+               f"{result.seconds:.1f}s · tap a wall to add or remove it · missed a patch? switch to "
+               f"<b>Touch up with brush</b>" + touched)
+    elif result.regions:
+        msg = (f"<b>{len(result.regions)} wall{'s' if len(result.regions) != 1 else ''} picked</b> · tap another wall to add it, "
+               f"tap a painted wall to remove it" + touched)
+    else:
+        msg = "<b>Tap a wall on the photo</b> to select it"
+    html(f'<div class="apx-muted">{msg}</div>')
+    if result.method == "tap" and SS.get("cs_taps"):
+        if st.button("Clear taps", key="cs_clear_taps"):
+            SS["cs_taps"], SS["cs_sel"] = [], None
+            st.rerun()
+
+
+def _touch_up(img_id, result: seg.SegmentationResult, base_alpha, sel, shade) -> None:
+    """Brush paint on / off in the browser — instant, no round trip per stroke."""
+    h, w = result.image.shape[:2]
+    orig_url = _memo(("orig_url",), lambda: to_data_url(result.image, "JPEG", 90))
+    painted_url = _memo(("painted_url", sel, shade["hex_code"]),
+                        lambda: to_data_url(_painted(result, sel, shade["hex_code"], base_alpha), "JPEG", 90))
+    base_url = _memo(("base_url", sel),
+                     lambda: to_data_url((np.clip(base_alpha, 0, 1) * 255).astype(np.uint8), "PNG"))
+    val = wall_brush(key=f"cs_brush_{img_id}_{SS.get('cs_brush_reset', 0)}", photo_key=img_id,
+                     orig_url=orig_url, painted_url=painted_url, base_url=base_url, width=w, height=h,
+                     edits_url=SS.get("cs_edits_url", ""), reset=SS.get("cs_brush_reset", 0))
+    if val and val.get("key") == img_id and val.get("ts") and val["ts"] != SS.get("cs_edits_ts"):
+        SS["cs_edits_url"] = val.get("edits") or ""
+        SS["cs_edits"] = decode_edits(SS["cs_edits_url"], (h, w))
+        SS["cs_edits_ts"] = val["ts"]
+        st.rerun()                      # update shade ideas, paint amount and the download
+    html('<div class="apx-muted"><b>Brush</b> paints a patch the walls missed · <b>Erase</b> takes paint off the '
+         'headboard, ceiling or lamps · <b>[</b> <b>]</b> or Alt + scroll change the size · hold 👁 to compare</div>')
+
+
 # ------------------------------------------------------------------ page
 def render() -> None:
     page_header("Colour Studio", "Show a customer their own room in any shade we stock.")
@@ -219,106 +299,48 @@ def render() -> None:
         result = _segmentation(img_id, image, segmenter)
         if SS.get("cs_sel") is None:
             SS["cs_sel"] = _default_selection(result)
-        alpha = result.selection_alpha(SS["cs_sel"])
-        palette = room_palette(result.image, result.label_map, result.id2label, alpha > 0.5)
-        wall_now = current_wall_colour(result.image, alpha)
-        recs = recommend_shades(palette, wall_now, SS.get("cs_mood", ""), limit=5)
+        sel = tuple(SS["cs_sel"])
+        ets = SS.get("cs_edits_ts", 0)
+        base_alpha = _memo(("base_alpha", sel), lambda: result.selection_alpha(list(sel)))
+        alpha = _memo(("alpha", sel, ets), lambda: apply_edits(base_alpha, SS.get("cs_edits")))
+        palette, wall_now, recs = _memo(
+            ("recs", sel, ets, SS.get("cs_mood", "")),
+            lambda: _recommendations(result, alpha, SS.get("cs_mood", "")))
         if recs and not SS.get("cs_shade"):
             SS["cs_shade"] = recs[0]
+        shade = SS.get("cs_shade")
 
         with st.container(border=True):
             h1, h2 = st.columns([3, 2], vertical_alignment="center")
             with h1:
                 step(2, "Pick a wall")
             with h2:
-                if SS.pop("cs_force_after", False) or "cs_mode_radio" not in SS:
-                    SS["cs_mode_radio"] = "After"
-                mode = st.radio("View", ["Before", "After"], horizontal=True, key="cs_mode_radio",
-                                label_visibility="collapsed")
+                view = st.radio("Mode", VIEW_MODES, horizontal=True, key="cs_view", label_visibility="collapsed")
+            touch_up = view == VIEW_MODES[1]
 
             names = {r.name: r.id for r in result.regions}
             if names:
                 cols = st.columns(len(names) + 1)
-                sel = set(SS["cs_sel"])
+                chosen = set(sel)
                 for col, (name, rid) in zip(cols, names.items()):
                     with col:
-                        on = rid in sel
+                        on = rid in chosen
                         if st.button(("✓ " if on else "") + name, key=f"cs_wall_{rid}", use_container_width=True,
                                      type="primary" if on else "secondary"):
-                            sel.symmetric_difference_update({rid})
-                            SS["cs_sel"] = sorted(sel)
+                            chosen.symmetric_difference_update({rid})
+                            SS["cs_sel"] = sorted(chosen)
                             st.rerun()
                 with cols[-1]:
-                    all_on = sel == set(names.values())
+                    all_on = chosen == set(names.values())
                     if st.button("All walls", key="cs_wall_all", use_container_width=True,
                                  type="primary" if all_on else "secondary"):
                         SS["cs_sel"] = [] if all_on else sorted(names.values())
                         st.rerun()
 
-            t1, t2 = st.columns([3, 2], vertical_alignment="center")
-            with t1:
-                st.radio("Tap the photo to", TAP_MODES, horizontal=True, key="cs_tap_mode",
-                         help="Missed a patch, or painted something that isn't wall? Switch here and tap it.")
-            with t2:
-                fixes = SS.get("cs_fixes", [])
-                if fixes:
-                    u1, u2 = st.columns(2)
-                    if u1.button("Undo fix", key="cs_undo_fix", use_container_width=True):
-                        fixes.pop()
-                        SS["cs_render_cache"] = {}
-                        st.rerun()
-                    if u2.button("Clear fixes", key="cs_clear_fixes", use_container_width=True):
-                        SS["cs_fixes"] = []
-                        SS["cs_render_cache"] = {}
-                        st.rerun()
-
-            shade = SS.get("cs_shade")
-            base = result.image
-            if mode == "After" and shade and SS["cs_sel"]:
-                cache = SS.setdefault("cs_render_cache", {})
-                rkey = (img_id, tuple(SS["cs_sel"]), shade["hex_code"], result.method, tuple(SS.get("cs_taps", [])),
-                        tuple(SS.get("cs_fixes", [])))
-                if rkey not in cache:
-                    cache.clear()
-                    cache[rkey] = recolour(base, alpha, shade["hex_code"])
-                shown = cache[rkey]
+            if touch_up and shade:
+                _touch_up(img_id, result, base_alpha, sel, shade)
             else:
-                shown = outline_overlay(
-                    base,
-                    [(r.mask, TEAL_RGB, 0.28 if r.id in SS["cs_sel"] else 0.0) for r in result.regions],
-                    thickness=2,
-                )
-
-            h, w = shown.shape[:2]
-            disp_h = int(h * DISPLAY_W / w)
-            pil = Image.fromarray(shown).resize((DISPLAY_W, disp_h), Image.LANCZOS)
-            if HAS_CLICK:
-                click = streamlit_image_coordinates(pil, key=f"cs_click_{img_id}")
-                _handle_click(click, result, DISPLAY_W, disp_h)
-            else:
-                show_image(pil)
-                st.caption("Install `streamlit-image-coordinates` to pick walls by tapping the photo.")
-
-            tap_mode = SS.get("cs_tap_mode", TAP_MODES[0])
-            n_fix = len(SS.get("cs_fixes", []))
-            fix_txt = f" · {n_fix} manual fix{'es' if n_fix != 1 else ''}" if n_fix else ""
-            if tap_mode == TAP_MODES[1]:
-                msg = "<b>Tap an unpainted patch</b> that should be wall — it's added to the nearest selected wall" + fix_txt
-            elif tap_mode == TAP_MODES[2]:
-                msg = "<b>Tap a painted patch</b> that isn't wall (headboard, curtain, ceiling) to take the paint off" + fix_txt
-            elif result.method == "model":
-                msg = (f"<b>{len(result.regions)} wall{'s' if len(result.regions) != 1 else ''} found</b> in "
-                       f"{result.seconds:.1f}s · ceiling, doors, windows and furniture are left untouched · tap a wall to add or remove it"
-                       + fix_txt)
-            elif result.regions:
-                msg = f"<b>{len(result.regions)} wall{'s' if len(result.regions) != 1 else ''} picked</b> · tap another wall to add it, tap a painted wall to remove it"
-            else:
-                msg = "<b>Tap a wall on the photo</b> to select it"
-            html(f'<div class="apx-muted">{msg}</div>')
-            if result.method == "tap" and SS.get("cs_taps"):
-                if st.button("Clear taps", key="cs_clear_taps"):
-                    SS["cs_taps"], SS["cs_sel"] = [], None
-                    st.rerun()
+                _pick_view(img_id, result, alpha, sel, ets, shade)
 
     with right:
         with st.container(border=True):
@@ -347,10 +369,10 @@ def render() -> None:
                 st.caption("Closest shades we sell:")
                 _shade_list(find_nearest_shades_by_hex(picked, limit=4), "cs_near", reason_key="_none")
 
-    _product_panel(result, alpha)
+    _product_panel(result, alpha, sel, ets)
 
 
-def _product_panel(result: seg.SegmentationResult, alpha: np.ndarray) -> None:
+def _product_panel(result: seg.SegmentationResult, alpha: np.ndarray, sel: tuple = (), ets: int = 0) -> None:
     shade = SS.get("cs_shade")
     if not shade:
         return
@@ -394,9 +416,14 @@ def _product_panel(result: seg.SegmentationResult, alpha: np.ndarray) -> None:
                 html(f'<div style="font-size:15px">Needs about <b>{need["litres"]:.1f} L</b> — not enough on the shelf for this wall.</div>')
             st.caption(f"Assumes about {need['coverage']} sq ft per litre per coat for {shade.get('category', 'this paint').lower()}.")
 
-            if SS.get("cs_sel"):
-                after = recolour(result.image, alpha, shade["hex_code"])
-                buf = io.BytesIO()
-                Image.fromarray(side_by_side(result.image, after)).save(buf, format="JPEG", quality=90)
-                st.download_button("Save before / after", buf.getvalue(), file_name=f"{shade['shade_name'].replace(' ', '_')}_preview.jpg",
+            if sel:
+                def _jpeg() -> bytes:
+                    base_alpha = _memo(("base_alpha", sel), lambda: result.selection_alpha(list(sel)))
+                    after = _after(result, sel, ets, shade["hex_code"], base_alpha, alpha)
+                    buf = io.BytesIO()
+                    Image.fromarray(side_by_side(result.image, after)).save(buf, format="JPEG", quality=90)
+                    return buf.getvalue()
+
+                data = _memo(("download", sel, ets, shade["hex_code"]), _jpeg)
+                st.download_button("Save before / after", data, file_name=f"{shade['shade_name'].replace(' ', '_')}_preview.jpg",
                                    mime="image/jpeg", type="primary", use_container_width=True)
