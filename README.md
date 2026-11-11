@@ -25,7 +25,7 @@
 | 3 · AI sales forecast & reorder | `src/sales_forecast.py`, `src/predictor.py` | Per product group, a ridge regression on six months of daily sales learns the weekday pattern, the real effect of each festival in the calendar (the calendar's multiplier is only a starting guess) and the trend; forecasts are split across products by recent share. Backtested against the simple 30-day average on periods it never saw. Reorder quantities and dates use the same forecast, with supplier lead time and minimum order. |
 | 4 · Alerts | `src/smart_alerts.py` | Running out before the supplier can deliver, batches expiring within 45 days, money stuck in slow sellers, days with many visitors but few bills. |
 | 5 · Store Camera | `src/camera_stream.py`, `src/shop_vision.py`, `src/shop_insights.py` | The camera as a data source. People detection (HOG) and tracking; door-line footfall; each customer's journey (shelves visited, cans taken / put back, reached the counter); can counting on shelf slots; walk-out (unpaid can) alerts; insights that join all of it with sales, stock and the forecast. |
-| 6 · Colour Studio | `src/colour_studio/` | SegFormer (ADE20K) via ONNX Runtime finds walls and separates them from ceiling, doors, windows and furniture; walls are split at corners; light-preserving recolouring in linear RGB; room-aware shade suggestions; paint quantity planner. |
+| 6 · Colour Studio | `src/colour_studio/` | SegFormer (ADE20K) via ONNX Runtime finds walls and separates them from ceiling, doors, windows and furniture; walls are split at corners; light-preserving recolouring in linear RGB; in-browser brush touch-ups; **designer looks** (whole 60-30-10 schemes scored against the room) shown on the customer's own walls; paint quantity planner. |
 | 7 · Ask Aura | `src/ai_assistant.py` | Gemini (optional) grounded in live shop data, with an offline mode for common questions. |
 
 UI system (names, colours, components) lives in `src/ui/theme.py` and `.streamlit/config.toml`.
@@ -83,6 +83,14 @@ The model predicts on a coarse grid, so its raw wall map has holes at lamp glow,
 6. **Ceiling line** — a wall meets the ceiling in a straight line; where glare hides it, paint goes up to the fitted line.
 
 Walls are then split at corners and named from perspective (flat ceiling line = back wall, sloping = left/right).
+
+### Designer looks (colour prediction)
+Under the photo, **Designer looks for this room** shows six complete schemes painted on the customer's own room — walls (60%), a feature wall (30%), trim & ceiling (10%) and two decor accents — like a Pinterest board.
+- The room is read from the photo: room type (bed → bedroom, sofa → living room…), undertone (wooden floor and furniture → warm), light (a dim room gets lighter walls), and the big furniture (a feature wall the colour of the sofa is marked down; one that echoes the bedding or plays off the sofa is marked up).
+- Style chips (Modern, Japandi, Boho, Indian festive, Luxe…) and mood words (*cozy*, *calm*, *festive*) steer it.
+- **Use this look** paints the walls (feature wall = back wall; change it in the look panel). Every paint is matched to a shade the shop stocks when one is close (ΔE < 6); otherwise it's an *Apex House Range* colour tinted at the counter (sample shade card with invented APX codes — replace with the shop's real one).
+- **Save look board** downloads a Pinterest-style card: the room in the look, swatches, shade names and codes.
+- Looks live in `src/colour_studio/palettes.py`.
 
 ### Touching up by hand
 Switch **Pick a wall** to **Touch up with brush**. The brush runs in the browser, so paint appears as you move:

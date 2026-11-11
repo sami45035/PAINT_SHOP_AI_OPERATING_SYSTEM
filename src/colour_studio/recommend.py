@@ -269,3 +269,10 @@ def recommend_shades(palette: List[Dict[str, Any]], wall: Optional[Dict[str, Any
     for p in picks:
         p.pop("lab", None)
     return picks
+
+
+def enrich_wall_paints(include_exterior: bool = False) -> List[Dict[str, Any]]:
+    """Wall paints we sell, with stock and pack options."""
+    from src.colour_assistant import enrich_shades_with_stock
+
+    return enrich_shades_with_stock(load_wall_paints(include_exterior=include_exterior))
