@@ -9,7 +9,7 @@ from src.dashboard_views import render_hourly_traffic_chart
 from src.ui import data
 from src.ui.theme import chip, html, page_header, show_chart
 
-GROUPS = ["All", "Running out", "Expiring", "Money stuck", "Visitors vs bills"]
+GROUPS = ["All", "Running out", "Shelves", "Theft", "Expiring", "Money stuck", "Visitors vs bills"]
 HIDE_DAYS = 3
 
 
@@ -36,6 +36,19 @@ def _card(alert: dict, idx: int) -> None:
         elif t in ("EXPIRING_BATCH", "EXPIRED_BATCH"):
             if b1.button(alert["action"], key=f"al_a_{idx}", type="primary", use_container_width=True):
                 _act(alert, "offer", f"{alert['action']} — noted. Hidden for {HIDE_DAYS} days.")
+        elif t == "REFILL_SHELF" and alert.get("move"):
+            if b1.button(alert["action"], key=f"al_a_{idx}", type="primary", use_container_width=True):
+                db.log_shelf_event(alert["source"], alert["slot_id"], alert.get("product_id") or None, "restock",
+                                   alert["move"])
+                _act(alert, "refilled", f"Shelf refilled with {alert['move']} cans.")
+        elif t == "UNPAID_EXIT":
+            if b1.button("Checked — real", key=f"al_a_{idx}", type="primary", use_container_width=True):
+                db.update_security_event_status(alert["event_id"], "SEEN")
+                _act(alert, "checked", "Marked as checked.")
+            if b2.button("False alarm", key=f"al_f_{idx}", use_container_width=True):
+                db.update_security_event_status(alert["event_id"], "FALSE_ALARM")
+                _act(alert, "false_alarm", "Marked as a false alarm.")
+            return
         elif t == "CONVERSION_DROP":
             with b1.popover(alert["action"], use_container_width=True):
                 day = datetime.strptime(alert["day"], "%Y-%m-%d").date()

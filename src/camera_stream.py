@@ -1,20 +1,27 @@
 """
-Store Camera (Layer 5): door counting and after-hours guard.
+Store Camera (Layer 5): the camera as a data source for the shop.
 
 Sources
-- "webcam": laptop / USB camera (works when the app runs on that laptop)
+- "webcam": laptop / USB camera (the app reads it when running on that laptop;
+            on Streamlit Cloud the browser sends frames instead)
 - "esp32":  ESP32-CAM MJPEG stream on the shop Wi-Fi
-- "demo":   a drawn scene for showing the feature. Clearly labelled, its
-            numbers are examples, and it NEVER writes to the database.
+- "demo":   a drawn paint shop (src.shop_vision.DemoShop). Its data is saved
+            with source='demo' so it never mixes with real numbers.
 
-What it does with real video
-- Finds people (OpenCV HOG detector + non-maximum suppression).
-- Follows each person between frames and counts them crossing the door line
-  (downward = coming in, upward = going out). Counts go into footfall_logs.
-- After closing time, any noticeable movement raises AFTER_HOURS_MOTION.
-- A person inside the staff-only zone raises RESTRICTED_ZONE_ENTRY.
-- Each alert type is saved at most once per SECURITY_ALERT_COOLDOWN_SECONDS,
-  with a snapshot photo.
+Per frame
+- Finds people (OpenCV HOG detector + non-maximum suppression; faces for people
+  close to the camera) and follows each one between frames.
+- Footfall: feet crossing the door line, downward = in, upward = out.
+- Journeys: for each customer who came in, which shelves they stood at, the
+  cans they took or put back, and whether they reached the billing counter.
+  Written to `visits` when they leave.
+- Shelves: cans counted on each shelf slot (shop_vision.ShelfMonitor); a drop
+  is a pick credited to the person who stood there, a rise is a put-back or a
+  refill. Written to `shelf_events` / `shelf_status`.
+- Theft: someone leaving with a picked can who never reached the counter
+  (UNPAID_EXIT), movement after closing (AFTER_HOURS_MOTION), a customer in the
+  staff-only area (RESTRICTED_ZONE_ENTRY). Saved with a photo, at most one per
+  type per SECURITY_ALERT_COOLDOWN_SECONDS (each walk-out is its own alert).
 """
 from __future__ import annotations
 
@@ -38,10 +45,27 @@ from src.config import (
     RESTRICTED_ZONE_BOX,
     SECURITY_ALERT_COOLDOWN_SECONDS,
 )
-from src.database import log_footfall, log_security_event
+from src.database import log_footfall, log_security_event, log_shelf_event, log_visit, set_shelf_status
+from src.shop_vision import (
+    COUNTER_SECONDS,
+    DemoShop,
+    Journey,
+    ShelfMonitor,
+    credit_pick,
+    credit_put_back,
+    demo_layout,
+    demo_products_from_db,
+    feet,
+    inside,
+    load_layout,
+    overlap_frac,
+    to_px,
+)
 
 SNAPSHOT_DIR = DATA_DIR / "security_snapshots"
-SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo feed"}
+SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}
+BLUE = (235, 140, 60)
+LOST_JOURNEY_S = 600.0     # a customer the camera lost and never saw leaving is closed after 10 minutes
 
 # Colours (BGR) for overlays
 YELLOW, RED, GREEN, WHITE, DARK = (74, 192, 245), (102, 112, 249), (128, 222, 74), (255, 255, 255), (43, 32, 21)
@@ -73,6 +97,7 @@ class Track:
     counted_in: bool = False
     counted_out: bool = False
     history: List[float] = field(default_factory=list)
+    out_x: Optional[float] = None     # where the feet were when last seen beyond the door line
 
 
 class StoreVisionEngine:
@@ -82,12 +107,30 @@ class StoreVisionEngine:
             source_type = "demo"
         self.source_type = source_type
         self.esp32_url = esp32_url or ESP32_DEFAULT_STREAM_URL
-        self.log_to_db = (source_type != "demo") if log_to_db is None else (log_to_db and source_type != "demo")
+        self.data_source = "demo" if source_type == "demo" else "camera"   # how rows are tagged in the database
+        self.log_to_db = True if log_to_db is None else bool(log_to_db)
         self.cap: Optional[cv2.VideoCapture] = None
         self.connected = False
-        self.door_line_y = DOOR_LINE_Y                  # adjustable from the Store Camera screen
-        self.zone_box = list(RESTRICTED_ZONE_BOX)
         self.status_message = ""
+
+        # Zones: door line, counter, staff-only area, shelf slots (fractions of the picture)
+        if source_type == "demo":
+            self.layout = demo_layout(demo_products_from_db())
+        else:
+            try:
+                self.layout = load_layout()
+            except Exception:  # noqa: BLE001 - no database yet
+                self.layout = {"door": {"y": DOOR_LINE_Y, "x1": 0.0, "x2": 1.0}, "counter": [0.04, 0.55, 0.40, 0.95],
+                               "staff_zone": list(RESTRICTED_ZONE_BOX), "shelves": []}
+        self.shelves = ShelfMonitor(self.layout.get("shelves", []))
+        self.journeys: Dict[int, Journey] = {}           # track id -> customer inside the shop
+        self.lost: List[Tuple[Journey, float]] = []       # customers the tracker lost, waiting to be seen leaving
+        self.events: List[Dict[str, Any]] = []            # newest first, for the Live screen
+        self._saved_shelves: Dict[str, Optional[int]] = {}
+        self._crossed: List[Tuple[Track, str]] = []
+        self._det_tracks: List[int] = []
+        self._frame_w: Optional[int] = None
+        self._demo_boxes: List[Tuple[int, int, int, int]] = []
 
         # Session counters (the database keeps the day's totals for real sources)
         self.total_entered = 0
@@ -97,6 +140,8 @@ class StoreVisionEngine:
         self.tracks: Dict[int, Track] = {}
         self.next_track_id = 1
         self.last_alert_at: Dict[str, float] = {}
+        self.last_alert: Optional[Dict[str, Any]] = None
+        self.latest_raw: Optional[np.ndarray] = None      # last clean frame (for zone set-up and calibration)
         self.bg = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=32, detectShadows=True)
         self.frames_seen = 0
 
@@ -126,8 +171,37 @@ class StoreVisionEngine:
             except Exception:
                 self.hog = None
 
-        # Demo walker state
+        # Demo shop
         self._demo_t0 = time.time()
+        self.demo_shop = DemoShop(self.layout) if source_type == "demo" else None
+
+    # ---------------------------------------------------------------- zones
+    @property
+    def door_line_y(self) -> float:
+        return float(self.layout["door"]["y"])
+
+    @door_line_y.setter
+    def door_line_y(self, v: float) -> None:
+        self.layout["door"]["y"] = float(v)
+
+    @property
+    def zone_box(self) -> List[float]:
+        return list(self.layout["staff_zone"])
+
+    @zone_box.setter
+    def zone_box(self, v) -> None:
+        self.layout["staff_zone"] = [float(x) for x in v]
+
+    def set_layout(self, layout: Dict[str, Any]) -> None:
+        self.layout = layout
+        self.shelves.set_slots(layout.get("shelves", []))
+
+    def _event(self, kind: str, text: str) -> None:
+        self.events.insert(0, {"time": clock.fmt_time(clock.now()), "kind": kind, "text": text})
+        del self.events[30:]
+
+    def slot(self, slot_id: str) -> Dict[str, Any]:
+        return next((s for s in self.layout.get("shelves", []) if s["id"] == slot_id), {"id": slot_id, "name": slot_id})
 
     # ---------------------------------------------------------------- stream
     def open_stream(self) -> bool:
@@ -219,44 +293,15 @@ class StoreVisionEngine:
         return frame
 
     # ---------------------------------------------------------------- demo
-    def _demo_person(self, w: int, h: int) -> Tuple[int, int, int, int]:
-        """A person walking in through the door, pausing, and walking out — on a 16 s loop."""
-        t = (time.time() - self._demo_t0) % 16.0
-        door_y = int(self.door_line_y * h)
-        if t < 6:      # walking in (top of frame toward the camera)
-            y = int(h * 0.30 + (door_y + 60 - h * 0.30) * (t / 6))
-        elif t < 9:    # browsing
-            y = door_y + 60
-        else:          # walking back out
-            y = int(door_y + 60 - (door_y + 60 - h * 0.30) * ((t - 9) / 7))
-        x = int(w * 0.50 + 30 * math.sin(t))
-        bw, bh = 56, 150
-        return x - bw // 2, y - bh, bw, bh
-
     def generate_synthetic_store_frame(self) -> np.ndarray:
-        h, w = 480, 640
-        frame = np.full((h, w, 3), (60, 49, 38), dtype=np.uint8)          # dark wall
-        cv2.rectangle(frame, (0, int(h * 0.66)), (w, h), (76, 64, 51), -1)  # floor
-        cv2.rectangle(frame, (30, 90), (140, 390), (94, 82, 70), -1)        # paint shelf
-        for sy in (150, 210, 270, 330):
-            cv2.line(frame, (30, sy), (140, sy), (131, 119, 107), 3)
-            for i, col in enumerate([(50, 90, 200), (70, 160, 60), (180, 140, 50)]):
-                cv2.circle(frame, (55 + i * 30, sy - 18), 12, col, -1, cv2.LINE_AA)
-        cv2.rectangle(frame, (250, 95), (400, 380), (131, 119, 107), 2)     # doorway
-        x, y, bw, bh = self._demo_person(w, h)
-        cx = x + bw // 2
-        cv2.circle(frame, (cx, y + 18), 16, (150, 170, 190), -1, cv2.LINE_AA)
-        cv2.rectangle(frame, (cx - 20, y + 36), (cx + 20, y + 100), (120, 70, 40), -1)
-        cv2.line(frame, (cx - 9, y + 100), (cx - 13, y + bh), (40, 40, 50), 6)
-        cv2.line(frame, (cx + 9, y + 100), (cx + 13, y + bh), (40, 40, 50), 6)
+        frame, self._demo_boxes = self.demo_shop.frame(time.time() - self._demo_t0)
         return frame
 
     # ---------------------------------------------------------------- detection
     def detect_people(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """Whole people (standing/walking). Used for door counting and the staff-only zone."""
         if self.source_type == "demo":
-            h, w = frame.shape[:2]
-            return [self._demo_person(w, h)]
+            return list(self._demo_boxes)
         if self.hog is None:
             return []
         h, w = frame.shape[:2]
@@ -298,6 +343,12 @@ class StoreVisionEngine:
         """
         entered = exited = 0
         margin = 0.05 * frame_h
+        self._crossed, self._det_tracks = [], []
+        door = self.layout.get("door", {})
+        x_lo = x_hi = None
+        if self._frame_w:
+            x_lo = (door.get("x1", 0.0) - 0.03) * self._frame_w
+            x_hi = (door.get("x2", 1.0) + 0.03) * self._frame_w
         unmatched = set(self.tracks)
         for (x, y, bw, bh) in detections:
             feet_visible = y + bh < frame_h - 3            # a box cut off by the frame bottom can't tell
@@ -317,22 +368,150 @@ class StoreVisionEngine:
                 tr.centroid, tr.box, tr.last_seen = c, (x, y, bw, bh), now_s
                 tr.frames += 1
                 tr.history = (tr.history + [c[1]])[-20:]
+            self._det_tracks.append(tr.id)
             if not feet_visible:
                 continue
             side = "out" if c[1] < line_y - margin else ("in" if c[1] > line_y + margin else None)
             if side is None:
                 continue
-            if tr.side == "out" and side == "in" and tr.frames >= 2 and not tr.counted_in:
+            # Only crossings through the doorway count (not staff walking along the back wall):
+            # the street side of the crossing must be within the door's width.
+            at_door = (lambda xx: xx is None or x_lo is None or x_lo <= xx <= x_hi)
+            if side == "out":
+                tr.out_x = c[0]
+            if tr.side == "out" and side == "in" and tr.frames >= 2 and (not tr.counted_in or tr.counted_out) \
+                    and at_door(tr.out_x):
+                # a new entry — also when someone appears at the doorway right where a leaver vanished
                 entered += 1
-                tr.counted_in = True
-            elif tr.side == "in" and side == "out" and tr.frames >= 2 and not tr.counted_out:
+                tr.counted_in, tr.counted_out = True, False
+                self._crossed.append((tr, "in"))
+            elif tr.side == "in" and side == "out" and tr.frames >= 2 and not tr.counted_out and at_door(c[0]):
                 exited += 1
                 tr.counted_out = True
+                self._crossed.append((tr, "out"))
             tr.side = side
         stale = 4.0 if self.source_type == "demo" else 1.5
         for tid in [t for t, tr in self.tracks.items() if now_s - tr.last_seen > stale]:
+            j = self.journeys.pop(tid, None)
+            if j is not None:
+                self.lost.append((j, now_s))               # may be the same person seen again at the door
             del self.tracks[tid]
         return entered, exited
+
+    # ---------------------------------------------------------------- journeys
+    def _finish_visit(self, j: Journey, now: datetime, frame: Optional[np.ndarray], seen_leaving: bool = True) -> None:
+        outcome = j.outcome() if seen_leaving else ("reached_counter" if j.reached_counter else "browsed")
+        picked = j.net_picked
+        if self.log_to_db:
+            log_visit(self.data_source, j.entered_at or now.replace(tzinfo=None), now.replace(tzinfo=None),
+                      j.reached_counter, j.shelves, picked, j.put_back, outcome)
+        words = {"reached_counter": "went to the counter", "browsed": "looked around", "unpaid_exit": "left with a can"}
+        self._event("visit", f"Customer left — {words.get(outcome, outcome)}"
+                    + (f", took {picked} can{'s' if picked != 1 else ''}" if picked else "")
+                    + (f", put back {j.put_back}" if j.put_back else ""))
+        if outcome == "unpaid_exit" and frame is not None:
+            items = ", ".join(f"{n} × {self.slot(sid).get('label') or self.slot(sid).get('name')} ({self.slot(sid).get('name')})"
+                              for sid, n in j.picks.items() if n > 0)
+            self._maybe_alert("UNPAID_EXIT", "Front door",
+                              f"Someone took {items} and left at {clock.fmt_time(now)} without going to the counter.",
+                              frame, now, key=f"UNPAID_EXIT:{id(j)}")
+
+    def _adopt_lost(self, now_s: float) -> Optional[Journey]:
+        """Someone leaving whom the tracker didn't see come in: most likely the customer it lost track of."""
+        if not self.lost:
+            return None
+        j, _ = self.lost.pop()          # most recently lost
+        return j
+
+    def _update_journeys(self, frame: np.ndarray, people, now: datetime, now_s: float, after_hours: bool):
+        h, w = frame.shape[:2]
+        for tr, direction in self._crossed:
+            if direction == "in":
+                self.journeys[tr.id] = Journey(entered_at=now.replace(tzinfo=None), entered_t=now_s)
+                self._event("door", "Customer came in")
+            else:
+                j = self.journeys.pop(tr.id, None) or self._adopt_lost(now_s)
+                if j is not None:
+                    self._finish_visit(j, now, frame)
+                else:
+                    self._event("door", "Someone left")
+        # customers the tracker lost long ago: close their visit without guessing theft
+        keep = []
+        for j, lost_at in self.lost:
+            if now_s - lost_at > LOST_JOURNEY_S:
+                self._finish_visit(j, now, frame, seen_leaving=False)
+            else:
+                keep.append((j, lost_at))
+        self.lost = keep
+
+        counter = to_px(self.layout["counter"], w, h)
+        staff = to_px(self.layout["staff_zone"], w, h)
+        slots = [(s, to_px(s["box"], w, h)) for s in self.layout.get("shelves", [])]
+        at_counter, in_staff = 0, []
+        for box, tid in zip(people, self._det_tracks):
+            ft = feet(box)
+            j = self.journeys.get(tid)
+            tr = self.tracks.get(tid)
+            if inside(ft, counter):
+                at_counter += 1
+            if inside(ft, staff) and (j is not None or after_hours):
+                in_staff.append(box)
+            if j is None:
+                continue
+            dt = min(1.0, max(0.0, now_s - getattr(tr, "_jt", now_s))) if tr is not None else 0.0
+            if tr is not None:
+                tr._jt = now_s
+            if inside(ft, counter):
+                j.counter_s += dt
+                if not j.reached_counter and j.counter_s >= COUNTER_SECONDS:
+                    j.reached_counter = True
+                    self._event("counter", "Customer at the billing counter")
+            for s, corners in slots:
+                sw = corners[2] - corners[0]
+                if corners[0] - 0.2 * sw <= ft[0] <= corners[2] + 0.2 * sw and ft[1] >= corners[3] \
+                        and overlap_frac(box, corners) >= 0.3:
+                    j.near_since[s["id"]] = now_s
+                    j.near_s[s["id"]] = j.near_s.get(s["id"], 0.0) + dt
+        return at_counter, in_staff
+
+    def _update_shelves(self, frame: np.ndarray, people, now: datetime, now_s: float) -> None:
+        if not self.shelves.slots:
+            return
+        for slot, delta, cans in self.shelves.update(frame, people):
+            sid, pid = slot["id"], slot.get("product_id")
+            label = slot.get("label") or slot.get("name", sid)
+            if delta < 0:
+                tid = credit_pick(self.journeys, sid, now_s)
+                if tid is not None:
+                    j = self.journeys[tid]
+                    j.picks[sid] = j.picks.get(sid, 0) + (-delta)
+                if self.log_to_db:
+                    log_shelf_event(self.data_source, sid, pid, "pick", -delta, at=now.replace(tzinfo=None))
+                self._event("pick", f"{-delta} × {label} taken from {slot.get('name', sid)}"
+                            + ("" if tid is not None else " (no customer seen there)"))
+            else:
+                back = 0
+                tid = credit_put_back(self.journeys, sid, now_s)
+                if tid is not None:
+                    j = self.journeys[tid]
+                    back = min(delta, j.picks.get(sid, 0))
+                    j.picks[sid] -= back
+                    j.put_back += back
+                    if self.log_to_db:
+                        log_shelf_event(self.data_source, sid, pid, "put_back", back, at=now.replace(tzinfo=None))
+                    self._event("put_back", f"{back} × {label} put back on {slot.get('name', sid)}")
+                if delta - back > 0:
+                    if self.log_to_db:
+                        log_shelf_event(self.data_source, sid, pid, "restock", delta - back, at=now.replace(tzinfo=None))
+                    self._event("restock", f"{slot.get('name', sid)} refilled: +{delta - back} {label}")
+        counts = self.shelves.counts()
+        if self.log_to_db:
+            for s in self.shelves.slots:
+                n = counts.get(s["id"])
+                if n is not None and self._saved_shelves.get(s["id"]) != n:
+                    set_shelf_status(self.data_source, s["id"], s.get("name", s["id"]), s.get("product_id"), n,
+                                     int(s.get("capacity", 4)), at=now.replace(tzinfo=None))
+                    self._saved_shelves[s["id"]] = n
 
     def _motion_fraction(self, frame: np.ndarray) -> float:
         small = cv2.resize(frame, (320, int(320 * frame.shape[0] / frame.shape[1])))
@@ -346,17 +525,22 @@ class StoreVisionEngine:
         cv2.imwrite(str(path), frame)
         return str(path.relative_to(DATA_DIR.parent))
 
-    def _maybe_alert(self, kind: str, zone: str, details: str, frame: np.ndarray, at: datetime) -> Optional[Dict[str, Any]]:
+    def _maybe_alert(self, kind: str, zone: str, details: str, frame: np.ndarray, at: datetime,
+                     key: Optional[str] = None) -> Optional[Dict[str, Any]]:
         now_s = time.time()
-        if now_s - self.last_alert_at.get(kind, 0.0) < SECURITY_ALERT_COOLDOWN_SECONDS:
+        key = key or kind
+        if now_s - self.last_alert_at.get(key, 0.0) < SECURITY_ALERT_COOLDOWN_SECONDS:
             return None
-        self.last_alert_at[kind] = now_s
+        self.last_alert_at[key] = now_s
         alert = {"type": kind, "zone": zone, "severity": "CRITICAL", "details": details, "saved": False}
         if self.log_to_db:
             photo = self._save_snapshot(frame, kind, at)
             alert["details"] = f"{details} Photo: {photo}"
-            log_security_event(kind, zone, "CRITICAL", alert["details"], at=at.replace(tzinfo=None))
+            log_security_event(kind, zone, "CRITICAL", alert["details"], at=at.replace(tzinfo=None),
+                               source=self.data_source)
             alert["saved"] = True
+        self.last_alert = alert
+        self._event("alert", details)
         return alert
 
     # ---------------------------------------------------------------- main step
@@ -374,24 +558,27 @@ class StoreVisionEngine:
                           "is_after_hours": not clock.is_store_open(now), "security_alert": None,
                           "timestamp": now.strftime("%Y-%m-%d %H:%M:%S")}
         frame = frame.copy()
+        raw = frame.copy()                      # shelves are read from the clean picture
+        self.latest_raw = raw
         h, w = frame.shape[:2]
+        self._frame_w = w
         self.frames_seen += 1
         line_y = int(self.door_line_y * h)
         after_hours = not clock.is_store_open(now)
+        now_s = time.time()
 
         people = self.detect_people(frame)
         faces = self.detect_faces(frame, people)
-        entered, exited = self._update_tracks(people, line_y, time.time(), h)
+        entered, exited = self._update_tracks(people, line_y, now_s, h)
         if entered or exited:
             self.total_entered += entered
             self.total_exited += exited
             if self.log_to_db:
-                log_footfall(count_in=entered, count_out=exited, at=now.replace(tzinfo=None))
+                log_footfall(count_in=entered, count_out=exited, at=now.replace(tzinfo=None), source=self.data_source)
         self.current_occupancy = max(0, self.total_entered - self.total_exited)
 
-        # Zones
-        zx1, zy1 = int(w * self.zone_box[0]), int(h * self.zone_box[1])
-        zx2, zy2 = int(w * self.zone_box[2]), int(h * self.zone_box[3])
+        at_counter, in_staff = self._update_journeys(raw, people, now, now_s, after_hours)
+        self._update_shelves(raw, people + faces, now, now_s)
 
         alert = None
         motion = self._motion_fraction(frame) if self.source_type != "demo" else 0.0
@@ -399,27 +586,57 @@ class StoreVisionEngine:
         if after_hours and not warming_up and (motion > 0.015 or people or faces):
             alert = self._maybe_alert(
                 "AFTER_HOURS_MOTION", "Main store area",
-                f"Movement at {clock.fmt_time(now)} while the shop is closed.", frame, now) or alert
-        for (x, y, bw, bh) in people:
-            cx, cy = x + bw // 2, y + bh // 2
-            in_zone = zx1 <= cx <= zx2 and zy1 <= cy <= zy2
-            colour = RED if in_zone else GREEN
+                f"Movement at {clock.fmt_time(now)} while the shop is closed.", raw, now) or alert
+        if in_staff:
+            alert = self._maybe_alert(
+                "RESTRICTED_ZONE_ENTRY", "Store room (staff only)",
+                f"A customer went into the staff-only area at {clock.fmt_time(now)}.", raw, now) or alert
+        if self.last_alert and alert is None and self.last_alert.get("_shown", 0) < 1:
+            alert = self.last_alert              # walk-out alerts raised while closing a visit
+            self.last_alert["_shown"] = 1
+
+        # ---- overlays
+        zx1, zy1, zx2, zy2 = to_px(self.layout["staff_zone"], w, h)
+        cx1, cy1, cx2, cy2 = to_px(self.layout["counter"], w, h)
+        door = self.layout["door"]
+        dx1, dx2 = int(door.get("x1", 0.0) * w), int(door.get("x2", 1.0) * w)
+        cv2.line(frame, (dx1, line_y), (dx2, line_y), YELLOW, 2)
+        cv2.putText(frame, "Door line", (dx1 + 6, line_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, YELLOW, 1, cv2.LINE_AA)
+        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), BLUE, 2)
+        cv2.putText(frame, "Billing counter", (cx1 + 6, cy1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, BLUE, 1, cv2.LINE_AA)
+        cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), RED, 2)
+        cv2.putText(frame, "Staff only", (zx1 + 6, zy1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, RED, 1, cv2.LINE_AA)
+        counts = self.shelves.counts()
+        for s_ in self.shelves.slots:
+            sx1, sy1, sx2, sy2 = to_px(s_["box"], w, h)
+            n, cap = counts.get(s_["id"]), int(s_.get("capacity", 4))
+            low = n is not None and n <= max(1, cap // 4)
+            col = RED if low else (WHITE if n is None else GREEN)
+            cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), col, 1)
+            tag = f"{s_['id']} {'?' if n is None else n}/{cap}"
+            cv2.rectangle(frame, (sx1, sy2 - 16), (sx1 + 8 * len(tag), sy2), DARK, -1)
+            cv2.putText(frame, tag, (sx1 + 3, sy2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
+
+        for (x, y, bw, bh), tid in zip(people, self._det_tracks):
+            j = self.journeys.get(tid)
+            if j is None:
+                colour, tag = (190, 190, 190), "Person"
+            elif j.net_picked and not j.reached_counter:
+                colour, tag = RED, f"Customer · {j.net_picked} can{'s' if j.net_picked != 1 else ''}"
+            elif j.reached_counter:
+                colour, tag = BLUE, "Customer · at counter"
+            else:
+                colour, tag = GREEN, "Customer"
+            if any(b == (x, y, bw, bh) for b in in_staff):
+                colour = RED
             cv2.rectangle(frame, (x, y), (x + bw, y + bh), colour, 2)
-            if in_zone:
-                alert = self._maybe_alert(
-                    "RESTRICTED_ZONE_ENTRY", "Storage room (staff only)",
-                    f"Someone entered the staff-only zone at {clock.fmt_time(now)}.", frame, now) or alert
+            cv2.putText(frame, tag, (x, max(14, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
 
         for (x, y, fw, fh) in faces:
             cv2.rectangle(frame, (x, y), (x + fw, y + fh), GREEN, 2)
             cv2.putText(frame, "Person", (x, max(14, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA)
 
-        # Overlays
-        cv2.line(frame, (0, line_y), (w, line_y), YELLOW, 2)
-        cv2.putText(frame, "Door line", (10, line_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, YELLOW, 1, cv2.LINE_AA)
-        cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), RED, 2)
-        cv2.putText(frame, "Staff only", (zx1 + 6, zy1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, RED, 1, cv2.LINE_AA)
-        label = SOURCE_LABELS[self.source_type] + (" (not real)" if self.source_type == "demo" else "")
+        label = SOURCE_LABELS[self.source_type] + (" (drawn example)" if self.source_type == "demo" else "")
         cv2.putText(frame, f"{label} | {now.strftime('%H:%M:%S')}", (10, h - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, WHITE, 1, cv2.LINE_AA)
 
@@ -430,12 +647,16 @@ class StoreVisionEngine:
             "entered": self.total_entered,
             "exited": self.total_exited,
             "occupancy": self.current_occupancy,
+            "inside_now": len(self.journeys),
+            "at_counter": at_counter,
+            "shelves": counts,
+            "events": list(self.events[:12]),
             "is_after_hours": after_hours,
             "security_alert": alert,
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
             # Boxes as fractions of the frame, for drawing over a live browser video
             "boxes": [{"x": x / w, "y": y / h, "w": bw / w, "h": bh / h,
-                       "zone": bool(zx1 <= x + bw // 2 <= zx2 and zy1 <= y + bh // 2 <= zy2), "kind": "person"}
+                       "zone": bool(zx1 <= x + bw // 2 <= zx2 and zy1 <= y + bh * 0.97 <= zy2), "kind": "person"}
                       for (x, y, bw, bh) in people]
                      + [{"x": x / w, "y": y / h, "w": fw / w, "h": fh / h, "zone": False, "kind": "face"}
                         for (x, y, fw, fh) in faces],

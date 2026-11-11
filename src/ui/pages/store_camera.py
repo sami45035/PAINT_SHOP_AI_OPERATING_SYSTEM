@@ -1,27 +1,48 @@
-"""Store Camera — who came in, and is the shop safe?"""
+"""
+Store Camera — the camera as a data source for the shop.
+
+Live            the picture with people, door line, counter, shelf counts, and what just happened
+Visitors & buyers   footfall, how many actually bought, where buyers are lost
+Shelves & fast movers  cans on each shelf, refill now, what to pre-order, what moves fast,
+                    what people pick up but don't buy
+Theft & safety  walk-outs with unpaid cans, shelf vs till, after-hours, staff-only area
+Set up          place the door line, counter, staff-only area and shelf slots; calibrate shelves
+"""
+import copy
+from datetime import datetime
 from html import escape
+from typing import Optional
 
 import cv2
 import streamlit as st
 from PIL import Image
 
+from src import camera_charts as cc
 from src import clock, database as db
 from src.camera_stream import SOURCE_LABELS, StoreVisionEngine
 from src.config import ESP32_DEFAULT_STREAM_URL, STORE_CLOSE_HOUR, STORE_OPEN_HOUR
+from src.formatting import rupees
+from src.shop_vision import draw_layout, save_layout
 from src.ui import data
 from src.ui.components import browser_cam, decode_image
-from src.ui.theme import banner, chip, html, kpi_card, page_header, show_image
+from src.ui.theme import banner, chip, html, kpi_card, page_header, show_chart, show_image
 
 SS = st.session_state
 EVENT_WORDS = {
     "AFTER_HOURS_MOTION": "Movement after hours",
-    "RESTRICTED_ZONE_ENTRY": "Someone in the staff-only zone",
+    "RESTRICTED_ZONE_ENTRY": "Customer in the staff-only area",
     "CAMERA_DISCONNECTED": "Camera went offline",
+    "UNPAID_EXIT": "Left with an unpaid can",
 }
-STATUS_CHIP = {"NEW": ("act_now", "New"), "SEEN": ("neutral", "Seen"), "VERIFIED": ("neutral", "Seen"),
+STATUS_CHIP = {"NEW": ("act_now", "New"), "SEEN": ("neutral", "Checked"), "VERIFIED": ("neutral", "Checked"),
                "RESOLVED": ("healthy", "Resolved"), "FALSE_ALARM": ("healthy", "False alarm")}
+DATA_SOURCES = {"camera": "This camera", "demo": "Demo shop", "sample": "Sample history (30 days)"}
+EVENT_CHIP = {"door": ("info", "Door"), "pick": ("soon", "Picked"), "put_back": ("neutral", "Put back"),
+              "restock": ("healthy", "Refill"), "counter": ("info", "Counter"), "visit": ("neutral", "Visit"),
+              "alert": ("act_now", "Alert")}
 
 
+# ----------------------------------------------------------------------------- engine
 def _engine(source: str, url: str) -> StoreVisionEngine:
     key = (source, url if source == "esp32" else "")
     eng = SS.get("cam_engine")
@@ -30,7 +51,7 @@ def _engine(source: str, url: str) -> StoreVisionEngine:
             eng.close_stream()
         eng = StoreVisionEngine(source_type=source, esp32_url=url)
         if eng.open_stream():
-            eng.start()                       # keeps counting in the background
+            eng.start()                       # keeps reading and counting in the background
         SS["cam_engine"], SS["cam_engine_key"] = eng, key
     elif eng.connected and not eng.running:
         eng.start()
@@ -41,103 +62,114 @@ def _hour(h: int) -> str:
     return f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}"
 
 
-def _counts(eng: StoreVisionEngine, metrics: dict) -> dict:
-    if eng.source_type == "demo":
-        c = {"in": metrics.get("entered", 0), "out": metrics.get("exited", 0)}
-        c["inside"] = max(0, c["in"] - c["out"])
-        c["note"] = "Demo counts since this page opened — examples, not saved"
-        return c
-    c = db.get_door_counts_today()           # camera counts only, not the sample visitors
-    c["note"] = "Today, counted at the door line by this camera"
-    return c
+def _title(text: str, sub: str = "") -> None:
+    html(f'<div class="apx-step-t" style="font-size:17px">{escape(text)}</div>'
+         + (f'<div class="apx-muted" style="margin:2px 0 8px">{sub}</div>' if sub else ""))
 
 
-def _feed(eng: StoreVisionEngine) -> None:
-    frame, metrics = eng.snapshot()
-    if frame is None and not eng.running:
-        frame, metrics = eng.process_frame()   # no background reader (e.g. camera just stopped)
-    counts = _counts(eng, metrics or {})
-    c1, c2, c3, c4 = st.columns(4)
+def _fill_bar(cans: int, cap: int) -> str:
+    pct = 0 if cap <= 0 else max(0, min(100, round(cans / cap * 100)))
+    colour = "#B42318" if pct <= 30 else ("#B54708" if pct <= 55 else "#067647")
+    return (f'<div style="height:8px;border-radius:99px;background:#EEF0F3;overflow:hidden;margin:6px 0 4px">'
+            f'<div style="width:{pct}%;height:100%;background:{colour}"></div></div>')
+
+
+# ----------------------------------------------------------------------------- live
+def _right_now(eng: StoreVisionEngine, metrics: dict) -> None:
+    counts = db.get_door_counts_today(source=eng.data_source)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        kpi_card("Came in", str(counts["in"]), "")
+        kpi_card("Came in today", str(counts["in"]), "door line")
     with c2:
-        kpi_card("Left", str(counts["out"]), "")
+        kpi_card("In the shop", str(metrics.get("inside_now", counts["inside"])), "customers")
     with c3:
-        kpi_card("Inside now", str(counts["inside"]), "")
-    with c4:
-        kpi_card("In view", str((metrics or {}).get("current_people", 0)), "")
-    st.caption(counts["note"])
+        kpi_card("At the counter", str(metrics.get("at_counter", 0)), "right now")
+    shelves = metrics.get("shelves") or {}
+    slots = eng.layout.get("shelves", [])
+    if slots:
+        rows = []
+        for s in slots:
+            n, cap = shelves.get(s["id"]), int(s.get("capacity", 4))
+            label = escape(s.get("label") or s["name"])
+            if n is None:
+                rows.append(f'<div class="apx-row" style="padding:4px 0"><span class="apx-row-main"><b>{escape(s["id"])}</b> '
+                            f'{label}<span class="apx-row-sub">reading…</span></span></div>')
+                continue
+            rows.append(f'<div style="padding:4px 0"><div style="display:flex;justify-content:space-between;font-size:13px">'
+                        f'<span><b>{escape(s["id"])}</b> {label}</span><span style="font-variant-numeric:tabular-nums">'
+                        f'<b>{n}</b>/{cap}</span></div>{_fill_bar(n, cap)}</div>')
+        html('<div class="apx-label" style="margin-top:12px">Shelves now</div>' + "".join(rows))
+    events = metrics.get("events") or []
+    html('<div class="apx-label" style="margin-top:12px">Just happened</div>')
+    if not events:
+        st.caption("Nothing yet — events appear as people come in, pick cans and pay.")
+    for e in events[:7]:
+        level, word = EVENT_CHIP.get(e["kind"], ("neutral", e["kind"]))
+        html(f'<div class="apx-row" style="align-items:flex-start;padding:4px 0">{chip(level, word)}'
+             f'<span class="apx-row-main" style="font-size:13px">{escape(e["text"])}'
+             f'<span class="apx-row-sub">{escape(e["time"])}</span></span></div>')
+
+
+def _show_frame(frame) -> None:
     if frame is None:
-        msg = "Starting camera…" if eng.running else "No video"
-        html('<div class="apx-card" style="background:#26313C;color:#C9CED6;height:300px;display:flex;'
-             f'align-items:center;justify-content:center;text-align:center">{msg}</div>')
+        html('<div class="apx-card" style="background:#26313C;color:#C9CED6;height:320px;display:flex;'
+             'align-items:center;justify-content:center;text-align:center">Starting camera…</div>')
         return
     show_image(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+
+
+def _alert_banner(metrics: dict) -> None:
     alert = (metrics or {}).get("security_alert")
     if alert:
-        saved = "" if alert.get("saved") else " (demo — not saved)"
-        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}: {escape(alert['details'])}{saved}")
+        tag = " (demo)" if SS.get("cam_source") == "demo" else ""
+        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}{tag}: "
+                                   f"{escape(alert['details'].split(' Photo:')[0])}")
 
 
 @st.fragment(run_every=2)
-def _live_feed() -> None:
-    """Re-runs only this part of the page every 2 seconds (the camera itself is read continuously)."""
-    eng = SS.get("cam_engine")
-    if eng is not None:
-        _feed(eng)
+def _live_server(eng: StoreVisionEngine) -> None:
+    """Camera read on this computer (webcam / ESP32 / demo) — refreshed every 2 seconds."""
+    frame, metrics = eng.snapshot()
+    if frame is None and not eng.running:
+        frame, metrics = eng.process_frame()
+    metrics = metrics or {}
+    if metrics.get("security_alert"):
+        SS["cam_last_alert"] = metrics["security_alert"]
+    left, right = st.columns([3, 2], gap="large")
+    with left:
+        _alert_banner({"security_alert": SS.get("cam_last_alert")})
+        _show_frame(frame)
+    with right:
+        _right_now(eng, metrics)
 
 
 @st.fragment
-def _browser_feed(eng: StoreVisionEngine) -> None:
-    """
-    The webcam of whoever has this page open (laptop, phone), streamed by the
-    browser — the only way a cloud server can see a camera. Only this part of
-    the page reruns for each frame.
-    """
-    val = browser_cam(key="cam_browser_live", ack=SS.get("bc_ack", 0), boxes=SS.get("bc_boxes", []),
-                      line=eng.door_line_y, zone=eng.zone_box)
-    if val and val.get("seq") and val["seq"] != SS.get("bc_ack"):
-        img = decode_image(val.get("frame", ""))
-        if img is not None:
-            _, m = eng.process_frame(img)
-            SS["bc_metrics"] = m
-            SS["bc_boxes"] = m.get("boxes", [])
-            if m.get("security_alert"):
-                SS["bc_alert"] = m["security_alert"]
-        SS["bc_ack"] = val["seq"]
-        st.rerun(scope="fragment")     # hand the boxes back and ask for the next frame
-    m = SS.get("bc_metrics") or {}
-    counts = _counts(eng, m)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        kpi_card("Came in", str(counts["in"]), "")
-    with c2:
-        kpi_card("Left", str(counts["out"]), "")
-    with c3:
-        kpi_card("Inside now", str(counts["inside"]), "")
-    with c4:
-        kpi_card("In view", str(m.get("current_people", 0)), "")
-    st.caption("Today, counted at the door line through this browser's camera")
-    alert = SS.get("bc_alert")
-    if alert:
-        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}: {escape(alert['details'])}")
+def _live_browser(eng: StoreVisionEngine) -> None:
+    """The camera of the device this page is open on, streamed by the browser (works on Streamlit Cloud)."""
+    left, right = st.columns([3, 2], gap="large")
+    with left:
+        _alert_banner({"security_alert": SS.get("cam_last_alert")})
+        val = browser_cam(key="cam_browser_live", ack=SS.get("bc_ack", 0), boxes=SS.get("bc_boxes", []),
+                          line=eng.door_line_y, zone=eng.zone_box)
+        if val and val.get("seq") and val["seq"] != SS.get("bc_ack"):
+            img = decode_image(val.get("frame", ""))
+            if img is not None:
+                _, m = eng.process_frame(img)
+                SS["bc_metrics"], SS["bc_boxes"] = m, m.get("boxes", [])
+                if m.get("security_alert"):
+                    SS["cam_last_alert"] = m["security_alert"]
+            SS["bc_ack"] = val["seq"]
+            st.rerun(scope="fragment")     # hand the boxes back and ask for the next frame
+    with right:
+        _right_now(eng, SS.get("bc_metrics") or {})
 
 
-def render() -> None:
-    page_header("Store Camera", "Counts people at the door and guards the shop after closing.")
-
-    top_l, top_r = st.columns([3, 2], vertical_alignment="bottom")
-    with top_r:
-        source = st.radio("Camera", list(SOURCE_LABELS), format_func=SOURCE_LABELS.get, horizontal=True,
-                          index=list(SOURCE_LABELS).index(SS.get("cam_source", "demo")), key="cam_source_radio",
-                          label_visibility="collapsed")
-        SS["cam_source"] = source
-    url = SS.get("esp32_url", ESP32_DEFAULT_STREAM_URL)
-    eng = _engine(source, url)
-
+def _live_tab(eng: StoreVisionEngine, source: str) -> None:
     browser_mode = source == "webcam" and not eng.connected
     if source == "demo":
-        banner("info", "Demo", escape(eng.status_message))
+        banner("info", "Demo shop", "A drawn paint shop on a 64-second loop, read by the same code as a real camera: "
+               "a buyer, a browser who puts a can back, a walk-out, an enquiry, and staff refilling the shelves. "
+               "Its numbers are saved as <b>Demo shop</b> data, never mixed with real ones.")
     elif browser_mode:
         banner("info", "Browser camera", "Using the camera of the device this page is open on (laptop or phone). "
                "Press <b>Start camera</b> and allow access. Counts and alerts are saved like a shop camera's.")
@@ -149,64 +181,422 @@ def render() -> None:
             if eng.open_stream():
                 eng.start()
             st.rerun()
+    if browser_mode:
+        _live_browser(eng)
+    elif eng.connected:
+        _live_server(eng)
+    if source == "esp32":
+        st.caption(f"Stream address: {SS.get('esp32_url', ESP32_DEFAULT_STREAM_URL)} — change it in Settings (sidebar).")
+
+
+# ----------------------------------------------------------------------------- data source for the numbers
+def _data_source(cam_source: str) -> str:
+    have_today = set(db.camera_sources_with_data())
+    options = ["sample"]
+    if "camera" in have_today or cam_source in ("webcam", "esp32"):
+        options.insert(0, "camera")
+    if "demo" in have_today or cam_source == "demo":
+        options.insert(0, "demo")
+    default = "demo" if cam_source == "demo" else ("camera" if "camera" in have_today else "sample")
+    if SS.get("cam_data_src") not in options or SS.get("cam_data_src_for") != cam_source:
+        SS["cam_data_src"] = default           # follow the camera choice until the user picks otherwise
+        SS["cam_data_src_for"] = cam_source
+    c1, c2 = st.columns([3, 1], vertical_alignment="center")
+    with c1:
+        src = st.radio("Numbers from", options, format_func=DATA_SOURCES.get, horizontal=True, key="cam_data_src")
+    with c2:
+        if st.button("Refresh numbers", key="cam_refresh_numbers", use_container_width=True):
+            data.clear_all()
+            st.rerun()
+    if src == "sample":
+        st.caption("Sample history: 30 days of camera data built to match the sample sales, so every screen has "
+                   "something to show. Switch to *This camera* once a camera has been running.")
+    elif src == "demo":
+        st.caption("Demo shop: what the drawn demo has recorded since it started. There's no till in the demo, "
+                   "so 'bought' is shown as 'reached the counter'.")
+    return src
+
+
+# ----------------------------------------------------------------------------- visitors & buyers
+def _buyers_tab(src: str, day: str) -> None:
+    f = data.cam_footfall(src, day)
+    b = data.cam_buyers(src, day)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        vs = f["vs_last_week_pct"]
+        sub = (f'<span class="{"apx-up" if vs >= 0 else "apx-down"}">{"▲" if vs >= 0 else "▼"} {abs(vs)}%</span> vs last '
+               f'{clock.now():%A}' if vs is not None else "today")
+        kpi_card("Came in", str(f["came_in"]), sub)
+    with c2:
+        if b["real_till"]:
+            kpi_card("Bought", f"{b['bought_pct']:.0f}%" if b["bought_pct"] is not None else "—",
+                     f"{b['bills'] or 0} bills ÷ {b['visitors']} visitors")
+        else:
+            kpi_card("Reached the counter", str(b["at_counter"]), "no till in the demo")
+    with c3:
+        kpi_card("Left without the counter", str(b["left_without_counter"]),
+                 f"of {b['finished_visits']} visits finished", attention=b["left_without_counter"] > b["at_counter"])
+    with c4:
+        kpi_card("Average stay", f"{f['avg_stay_min']:.0f} min" if f["avg_stay_min"] else "—", "per visit")
+    with c5:
+        pk = f["peak"]
+        kpi_card("Busiest hour", pk["label"] if pk else "—", f"{pk['visitors']} came in" if pk else "")
+
+    st.write("")
+    left, right = st.columns([2, 3], gap="large")
+    with left:
+        with st.container(border=True):
+            _title("Where visitors go", "Today, from the door to the till")
+            show_chart(cc.funnel_chart(b), key="cam_funnel")
+    with right:
+        with st.container(border=True):
+            _title("Came in vs bought, by hour")
+            show_chart(cc.hourly_buyers_chart(b["hourly"], b["real_till"]), key="cam_hourly")
+
+    tips = []
+    for w in b["weak_hours"]:
+        val = f" — about {rupees(round(w['missed_bills'] * b['avg_bill']))} in sales" if b["avg_bill"] else ""
+        tips.append(("soon", f"{w['label']}: {w['visitors']} came in, {w['bills']} bought",
+                     f"At today's usual rate that's {w['missed_bills']} more bill{'s' if w['missed_bills'] != 1 else ''}{val}. "
+                     "Was the counter busy, or a popular shade out? Put a second person on the floor at this hour."))
+    if b["visitors"] and b["at_shelves"] < b["visitors"] * 0.4:
+        tips.append(("look_into", "Most visitors don't reach the shelves",
+                     f"Only {b['at_shelves']} of {b['visitors']} stood at a watched shelf. Move the best sellers nearer the door."))
+    if f["peak"]:
+        tips.append(("info", f"Busiest at {f['peak']['label']}",
+                     "Keep the counter staffed and the fast movers stocked before this hour."))
+    if tips:
+        cols = st.columns(min(3, len(tips)))
+        for col, (lvl, t, d) in zip(cols, tips[:3]):
+            with col:
+                with st.container(border=True):
+                    html(f'{chip(lvl, "Insight" if lvl == "info" else None)}<div style="font-weight:600;margin:8px 0 4px">'
+                         f'{escape(t)}</div><div class="apx-muted" style="line-height:1.5">{escape(d)}</div>')
+    if b["real_till"]:
+        with st.container(border=True):
+            _title("Visitors who bought · last 14 days")
+            show_chart(cc.daily_bought_chart(data.cam_daily(src, day)), key="cam_daily")
+
+
+# ----------------------------------------------------------------------------- shelves & fast movers
+def _shelves_tab(src: str, day: str) -> None:
+    sh = data.cam_shelves(src, day)
+    po = data.cam_preorder(src, day)
+    fm = data.cam_fast_movers(src, day)
+
+    with st.container(border=True):
+        _title("Shelves right now", "Cans counted on each watched shelf; the store room is what the stock book has beyond that")
+        if sh.empty:
+            st.info("No shelves are watched yet. In **Set up**, draw a box around each shelf slot and pick its product.")
+        else:
+            cols = st.columns(min(6, len(sh)))
+            for i, r in enumerate(sh.to_dict("records")):
+                with cols[i % len(cols)]:
+                    cap = int(r["capacity"])
+                    low = r["cans"] <= max(1, round(cap * 0.3))
+                    html(f'<div class="apx-card{" attention" if low else ""}" style="padding:12px">'
+                         f'<div style="display:flex;gap:8px;align-items:center"><span class="apx-sw" style="background:'
+                         f'{escape(r.get("hex_code") or "#ccc")}"></span><span style="font-weight:600;font-size:13px">'
+                         f'{escape(r["slot_id"])} · {escape(r["label"])}</span></div>'
+                         f'<div class="apx-kpi" style="font-size:24px">{r["cans"]}<span class="apx-muted" style="font-size:14px">'
+                         f' / {cap}</span></div>{_fill_bar(r["cans"], cap)}'
+                         f'<div class="apx-muted" style="font-size:12px">{r["store_room"]} in store room'
+                         + (f' · {r["on_order"]} on order' if r["on_order"] else "") + "</div></div>")
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        with st.container(border=True):
+            _title("Refill now", "Low shelves with cans waiting in the store room")
+            if not po["refill"]:
+                html(f'{chip("healthy", "All good")} <span class="apx-muted">Every watched shelf is stocked.</span>')
+            for i, r in enumerate(po["refill"]):
+                c1, c2 = st.columns([4, 1.4], vertical_alignment="center")
+                with c1:
+                    html(f'<div class="apx-row" style="align-items:flex-start">{chip(r["level"])}<span class="apx-row-main">'
+                         f'{escape(r["message"])}</span></div>')
+                with c2:
+                    if r["move"] and st.button(f"Refilled", key=f"cam_refill_{i}", use_container_width=True,
+                                               help=f"Records {r['move']} cans moved to {r['slot_name']}"):
+                        db.log_shelf_event(src, r["slot_id"], int(r["product_id"]) if r["product_id"] else None,
+                                           "restock", int(r["move"]))
+                        data.clear_all()
+                        st.rerun()
+    with right:
+        with st.container(border=True):
+            _title("Pre-order", "From the sales forecast, supplier lead times and the camera's pick-up trend")
+            if not po["order"]:
+                html(f'{chip("healthy", "Nothing due")} <span class="apx-muted">No product runs out before its supplier can deliver.</span>')
+            for i, o in enumerate(po["order"][:6]):
+                c1, c2 = st.columns([4, 1.4], vertical_alignment="center")
+                with c1:
+                    cam = " 📷" if o["watched"] else ""
+                    html(f'<div class="apx-row" style="align-items:flex-start"><span class="apx-sw" style="background:'
+                         f'{escape(o["hex_code"])}"></span><span class="apx-row-main"><b>{escape(o["label"])}</b>{cam} · '
+                         f'{escape(o["when"])} · <b>{o["qty"]} cans</b> ({rupees(o["cost"])})'
+                         f'<span class="apx-row-sub">{escape(o["message"])}</span></span></div>')
+                with c2:
+                    if st.button("Ordered", key=f"cam_order_{i}", use_container_width=True,
+                                 help="Adds these cans to 'on order'"):
+                        db.mark_ordered(o["product_id"], o["qty"])
+                        data.clear_all()
+                        st.toast(f"{o['qty']} × {o['label']} marked as ordered.")
+                        st.rerun()
+            if len(po["order"]) > 6:
+                st.caption(f"{len(po['order']) - 6} more on the Stock & Reorder screen. 📷 = shelf watched by the camera.")
 
     left, right = st.columns([3, 2], gap="large")
     with left:
         with st.container(border=True):
-            if browser_mode:
-                _browser_feed(eng)
-            else:
-                live = st.toggle("Live view (screen updates every 2 seconds)", value=True, key="cam_live",
-                                 disabled=not eng.connected)
-                if live and eng.connected:
-                    _live_feed()
-                else:
-                    _feed(eng)
-                    if eng.connected and st.button("Refresh", key="cam_refresh"):
-                        st.rerun()
-
-            with st.expander("Adjust door line and staff-only zone"):
-                eng.door_line_y = st.slider("Door line height", 0.2, 0.95, float(eng.door_line_y), 0.01,
-                                            help="People crossing this line downward are counted as coming in.")
-                z = eng.zone_box
-                x1, x2 = st.slider("Staff-only zone — left/right", 0.0, 1.0, (float(z[0]), float(z[2])), 0.01)
-                y1, y2 = st.slider("Staff-only zone — top/bottom", 0.0, 1.0, (float(z[1]), float(z[3])), 0.01)
-                eng.zone_box = [x1, y1, x2, y2]
-            if source == "esp32":
-                st.caption(f"Stream address: {url} — change it in Settings (sidebar).")
-
+            _title("Fast movers · last 7 days", "From the till; picked up / put back from the camera for watched shelves")
+            top = fm["top"]
+            if top.empty:
+                st.caption("No sales in the last 7 days.")
+            rows = []
+            for r in top.to_dict("records"):
+                tr = r.get("trend_pct")
+                trend = "" if tr is None or tr != tr else (
+                    f'<span class="{"apx-up" if tr >= 0 else "apx-down"}">{"▲" if tr >= 0 else "▼"} {abs(tr):.0f}%</span>')
+                picked = r.get("picked")
+                cam = "" if picked is None or picked != picked else (
+                    f' · 📷 picked up {int(picked)}×, put back {int(r["put_back_pct"])}%')
+                rows.append(f'<div class="apx-row"><span class="apx-sw" style="background:{escape(r["hex_code"])}"></span>'
+                            f'<span class="apx-row-main"><b>{escape(r["label"])}</b> <span class="apx-muted">· {escape(r["brand"])}</span>'
+                            f'<span class="apx-row-sub">{r["per_day"]:.1f} a day{cam}</span></span>'
+                            f'<span class="apx-row-right">{int(r["units"])} cans {trend}</span></div>')
+            html("".join(rows))
     with right:
         with st.container(border=True):
-            armed = not clock.is_store_open()
-            hdr = chip("act_now", "Armed now") if armed else chip("info", f"Arms at {_hour(STORE_CLOSE_HOUR)}")
-            html(f'<div style="display:flex;justify-content:space-between;align-items:center">'
-                 f'<span class="apx-step-t" style="font-size:16px">After-hours guard</span>{hdr}</div>'
-                 f'<div class="apx-muted" style="margin-top:6px">Any movement between {_hour(STORE_CLOSE_HOUR)} and '
-                 f'{_hour(STORE_OPEN_HOUR)} (India time) raises one alert per minute, with a photo.</div>')
+            _title("Picked up, put back, sold", "Watched shelves, last 7 days")
+            show_chart(cc.picks_vs_sold_chart(fm["watched"]), key="cam_picks")
+        for h in fm["hesitant"][:2]:
+            with st.container(border=True):
+                html(f'{chip("look_into", "Picked up, not bought")}<div style="font-weight:600;margin:8px 0 4px">'
+                     f'{escape(h["label"])}</div><div class="apx-muted" style="line-height:1.5">{escape(h["message"])}</div>')
+        for r in fm["rising"][:2]:
+            with st.container(border=True):
+                html(f'{chip("info", "Demand building")}<div style="font-weight:600;margin:8px 0 4px">{escape(r["label"])}</div>'
+                     f'<div class="apx-muted" style="line-height:1.5">{escape(r["message"])}</div>')
 
+
+# ----------------------------------------------------------------------------- theft & safety
+def _security_log(src: str) -> None:
+    events = data.cam_theft(src, clock.today_str())["events"]
+    if events.empty:
+        st.caption("No security events in the last 7 days.")
+    for e in events.head(8).itertuples(index=False):
+        level, word = STATUS_CHIP.get(e.status, ("neutral", e.status.title()))
+        try:
+            dt = datetime.strptime(e.timestamp, "%Y-%m-%d %H:%M:%S")
+            ts = f"{clock.fmt_day(dt.date())}, {clock.fmt_time(dt)}"
+        except ValueError:
+            ts = e.timestamp
+        details = (e.details or "").split(" Photo:")[0]
+        html(f'<div class="apx-row" style="align-items:flex-start">{chip(level, word)}<span class="apx-row-main">'
+             f'<b style="font-weight:600">{escape(EVENT_WORDS.get(e.event_type, e.event_type.title()))}</b> · {escape(e.zone)}'
+             f'<span class="apx-row-sub">{escape(ts)} — {escape(details)}</span></span></div>')
+        if e.status == "NEW":
+            b1, b2 = st.columns(2)
+            if b1.button("Checked", key=f"ev_seen_{e.id}", use_container_width=True):
+                db.update_security_event_status(e.id, "SEEN")
+                data.clear_all()
+                st.rerun()
+            if b2.button("False alarm", key=f"ev_false_{e.id}", use_container_width=True):
+                db.update_security_event_status(e.id, "FALSE_ALARM")
+                data.clear_all()
+                st.rerun()
+
+
+def _theft_tab(src: str, day: str) -> None:
+    th = data.cam_theft(src, day)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi_card("Walk-outs with a can", str(th["walkouts_today"]), "today", attention=th["walkouts_today"] > 0,
+                 value_colour="#B42318" if th["walkouts_today"] else None)
+    with c2:
+        kpi_card("Shelf vs till gap", rupees(th["unbilled_value"]), "today, cans gone without a bill",
+                 attention=th["unbilled_value"] > 0)
+    with c3:
+        kpi_card("Alerts to check", str(th["open"]), "last 7 days", attention=th["open"] > 0)
+    with c4:
+        kpi_card("After hours / staff area", f"{th['after_hours']} / {th['staff_zone']}", "last 7 days")
+
+    st.write("")
+    left, right = st.columns([3, 2], gap="large")
+    with left:
         with st.container(border=True):
-            html('<span class="apx-step-t" style="font-size:16px">Security log</span>')
-            events = db.get_recent_security_events(6)
-            if events.empty:
-                st.caption("No security events yet.")
-            for e in events.itertuples(index=False):
-                level, word = STATUS_CHIP.get(e.status, ("neutral", e.status.title()))
-                ts = e.timestamp
-                try:
-                    from datetime import datetime
+            _title("Shelf vs till · today",
+                   "Cans that left the watched shelves (not put back) compared with what the till billed")
+            if not th["shelf_vs_till"]:
+                html(f'{chip("healthy", "Matches")} <span class="apx-muted">Every can that left a watched shelf today '
+                     "has a bill (cans picked in the last 20 minutes are left out — they may still be on the way to the counter).</span>")
+            for g in th["shelf_vs_till"]:
+                missing_chip = chip("soon", str(g["missing"]) + " missing")
+                html(f'<div class="apx-row">{missing_chip}<span class="apx-row-main"><b>{escape(g["label"])}</b>'
+                     f'<span class="apx-row-sub">{g["taken"]} taken off the shelf · {g["sold"]} billed · about '
+                     f'{rupees(g["value"])}</span></span></div>')
+            st.caption("A gap can also be a missed bill or a can moved to the store room — check before blaming anyone.")
+        with st.container(border=True):
+            _title("How the camera spots theft")
+            html('<div class="apx-muted" style="line-height:1.7">'
+                 "• <b>Walk-out:</b> a can disappears from a shelf while someone stands there, and that person crosses the door "
+                 "line going out without having stood at the billing counter → alert with a photo.<br>"
+                 "• <b>Shelf vs till:</b> every can taken (and not put back) is compared with the day's bills.<br>"
+                 f"• <b>After hours:</b> any movement between {_hour(STORE_CLOSE_HOUR)} and {_hour(STORE_OPEN_HOUR)}.<br>"
+                 "• <b>Staff-only area:</b> a customer (someone who came in through the door) standing in it.</div>")
+    with right:
+        with st.container(border=True):
+            _title("Security log", "Last 7 days")
+            _security_log(src)
 
-                    dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                    ts = f"{clock.fmt_day(dt.date())}, {clock.fmt_time(dt)}"
-                except ValueError:
-                    pass
-                html(f'<div class="apx-row" style="align-items:flex-start">{chip(level, word)}<span class="apx-row-main">'
-                     f'<b style="font-weight:600">{escape(EVENT_WORDS.get(e.event_type, e.event_type.title()))}</b> · {escape(e.zone)}'
-                     f'<span class="apx-row-sub">{escape(ts)}</span></span></div>')
-                if e.status == "NEW":
-                    b1, b2 = st.columns(2)
-                    if b1.button("Seen", key=f"ev_seen_{e.id}", use_container_width=True):
-                        db.update_security_event_status(e.id, "SEEN")
-                        st.rerun()
-                    if b2.button("False alarm", key=f"ev_false_{e.id}", use_container_width=True):
-                        db.update_security_event_status(e.id, "FALSE_ALARM")
-                        st.rerun()
+
+# ----------------------------------------------------------------------------- set up
+ZONE_KINDS = ["Shelf slot", "Billing counter", "Staff-only area", "Door line"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _product_choices():
+    df = db.get_all_products()
+    df = df[df["category"] != "Waterproofing"]
+    return {int(r.id): f"{r.shade_name} {r.pack_size_litres:g} L · {r.brand}" for r in df.itertuples(index=False)}
+
+
+def _setup_tab(eng: StoreVisionEngine, source: str) -> None:
+    if source == "demo":
+        st.info("The demo shop's zones are fixed. Switch the camera to **Webcam** or **ESP32-CAM** to set up your own.")
+        frame = eng.latest_raw
+        if frame is not None:
+            show_image(Image.fromarray(cv2.cvtColor(draw_layout(frame, eng.layout), cv2.COLOR_BGR2RGB)))
+        return
+    frame = eng.latest_raw
+    if frame is None:
+        st.info("Start the camera on the **Live** tab first — set-up needs a picture of the shop.")
+        return
+    lay = SS.setdefault("cam_layout_edit", copy.deepcopy(eng.layout))
+    pending = SS.setdefault("cam_clicks", [])
+
+    left, right = st.columns([3, 2], gap="large")
+    with right:
+        with st.container(border=True):
+            _title("Place a zone", "Pick what to place, then tap two corners on the picture")
+            kind = st.radio("What", ZONE_KINDS, key="cam_zone_kind", label_visibility="collapsed")
+            if kind == "Shelf slot":
+                prods = _product_choices()
+                st.selectbox("Product on this slot", list(prods), format_func=prods.get, key="cam_slot_product")
+                st.number_input("Cans that fit side by side", 1, 30, 8, 1, key="cam_slot_capacity")
+                st.caption("One slot = one product, cans standing side by side, fronts facing the camera.")
+            elif kind == "Door line":
+                st.caption("Tap the left and right ends of the doorway, at the height where people's feet cross it.")
+            else:
+                st.caption("Tap two opposite corners of the floor area where people stand.")
+            if pending:
+                st.caption(f"{len(pending)} of 2 corners placed.")
+                if st.button("Start over", key="cam_clicks_reset"):
+                    SS["cam_clicks"] = []
+                    st.rerun()
+        with st.container(border=True):
+            _title("Shelf slots")
+            if not lay.get("shelves"):
+                st.caption("None yet.")
+            for i, s in enumerate(list(lay.get("shelves", []))):
+                c1, c2 = st.columns([4, 1], vertical_alignment="center")
+                c1.markdown(f"**{s['id']}** · {s.get('label', '')} · {s.get('capacity', 8)} cans")
+                if c2.button("✕", key=f"cam_del_slot_{i}", help="Remove this slot"):
+                    lay["shelves"].pop(i)
+                    st.rerun()
+        b1, b2 = st.columns(2)
+        if b1.button("Save set-up", type="primary", key="cam_save_layout", use_container_width=True):
+            save_layout(lay)
+            eng.set_layout(copy.deepcopy(lay))
+            st.toast("Set-up saved — the camera uses it now.")
+        if b2.button("Undo changes", key="cam_undo_layout", use_container_width=True):
+            SS["cam_layout_edit"] = copy.deepcopy(eng.layout)
+            SS["cam_clicks"] = []
+            st.rerun()
+        with st.container(border=True):
+            _title("Calibrate shelves", "Do this once the slots are saved, with the shelves as they are now")
+            slots = eng.layout.get("shelves", [])
+            counts = {}
+            for s in slots:
+                counts[s["id"]] = st.number_input(f"{s['id']} · cans on it now", 0, int(s.get("capacity", 8)),
+                                                  int(s.get("capacity", 8)), 1, key=f"cam_cal_{s['id']}")
+            if slots and st.button("Calibrate now", key="cam_calibrate", use_container_width=True):
+                done = eng.shelves.calibrate(eng.latest_raw, counts)
+                for s in slots:
+                    if s["id"] in done:
+                        db.set_shelf_status(eng.data_source, s["id"], s["name"], s.get("product_id"), done[s["id"]],
+                                            int(s.get("capacity", 8)))
+                data.clear_all()
+                st.toast(f"Calibrated {len(done)} shelf slot{'s' if len(done) != 1 else ''}.")
+    with left:
+        shown = draw_layout(frame, lay, pending)
+        rgb = cv2.cvtColor(shown, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        disp_w = 720
+        pil = Image.fromarray(rgb).resize((disp_w, int(h * disp_w / w)))
+        try:
+            from streamlit_image_coordinates import streamlit_image_coordinates
+        except ImportError:  # pragma: no cover
+            show_image(pil)
+            st.caption("Install streamlit-image-coordinates to place zones by tapping.")
+            return
+        click = streamlit_image_coordinates(pil, key="cam_setup_click")
+        if click and (click.get("x"), click.get("y"), click.get("unix_time")) != SS.get("cam_last_click"):
+            SS["cam_last_click"] = (click.get("x"), click.get("y"), click.get("unix_time"))
+            pw, ph = click.get("width") or disp_w, click.get("height") or pil.height
+            pending.append((round(click["x"] / pw, 4), round(click["y"] / ph, 4)))
+            if len(pending) == 2:
+                (xa, ya), (xb, yb) = pending
+                x1, x2, y1, y2 = min(xa, xb), max(xa, xb), min(ya, yb), max(ya, yb)
+                kind = SS.get("cam_zone_kind", ZONE_KINDS[0])
+                if kind == "Door line":
+                    lay["door"] = {"y": round((ya + yb) / 2, 4), "x1": x1, "x2": x2}
+                elif kind == "Billing counter":
+                    lay["counter"] = [x1, y1, x2, y2]
+                elif kind == "Staff-only area":
+                    lay["staff_zone"] = [x1, y1, x2, y2]
+                else:
+                    pid = SS.get("cam_slot_product")
+                    used = {s["id"] for s in lay.get("shelves", [])}
+                    sid = next(f"S{i}" for i in range(1, 99) if f"S{i}" not in used)
+                    label = _product_choices().get(pid, "").split(" · ")[0]
+                    lay.setdefault("shelves", []).append({
+                        "id": sid, "name": f"Shelf {sid}", "box": [x1, y1, x2, y2], "product_id": pid,
+                        "capacity": int(SS.get("cam_slot_capacity", 8)), "label": label})
+                SS["cam_clicks"] = []
+            st.rerun()
+        st.caption("Unsaved changes are drawn here; press **Save set-up** to use them.")
+
+
+# ----------------------------------------------------------------------------- page
+def render() -> None:
+    page_header("Store Camera", "Footfall, who actually buys, shelf stock, fast movers and theft — from one camera.")
+    top_l, top_r = st.columns([3, 2], vertical_alignment="bottom")
+    with top_r:
+        source = st.radio("Camera", list(SOURCE_LABELS), format_func=SOURCE_LABELS.get, horizontal=True,
+                          index=list(SOURCE_LABELS).index(SS.get("cam_source", "demo")), key="cam_source_radio",
+                          label_visibility="collapsed")
+        SS["cam_source"] = source
+    with top_l:
+        if source == "demo" and st.button("Clear demo numbers", key="cam_clear_demo",
+                                          help="Forget everything the demo shop has recorded"):
+            db.clear_camera_data("demo")
+            data.clear_all()
+            st.rerun()
+    url = SS.get("esp32_url", ESP32_DEFAULT_STREAM_URL)
+    eng = _engine(source, url)
+    day = clock.today_str()
+
+    tabs = st.tabs(["Live", "Visitors & buyers", "Shelves & fast movers", "Theft & safety", "Set up"])
+    with tabs[0]:
+        _live_tab(eng, source)
+    with tabs[1]:
+        src = _data_source(source)
+        _buyers_tab(src, day)
+    with tabs[2]:
+        st.caption(f"Numbers from: **{DATA_SOURCES[src]}** (change on the Visitors & buyers tab)")
+        _shelves_tab(src, day)
+    with tabs[3]:
+        st.caption(f"Numbers from: **{DATA_SOURCES[src]}** (change on the Visitors & buyers tab)")
+        _theft_tab(src, day)
+    with tabs[4]:
+        _setup_tab(eng, source)

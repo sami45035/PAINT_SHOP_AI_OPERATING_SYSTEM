@@ -1,0 +1,185 @@
+"""
+Sample shop-camera history (source = 'sample'), built from the sample sales.
+
+So the camera screens have 30 days to show on day one, every visit, shelf
+pick and walk-out here is consistent with the sales table:
+- each bill in an hour is one visitor who reached the counter; the rest of
+  that hour's visitors browsed (a few asked something at the counter)
+- buyers of a 1 L / 4 L pack that sits on a camera-watched shelf took those
+  cans off the shelf; browsers sometimes pick a can up and put it back
+- shelves are refilled each morning; two are left short so "refill" and
+  "pre-order" have something real to find
+- three walk-outs with an unpaid can (one recent, two already handled)
+
+Run on its own to add the history to an existing database:
+    python data/seed_camera.py
+"""
+import random
+import sqlite3
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+from src.database import CAMERA_TABLES_SQL  # noqa: E402
+from src.shop_vision import DEMO_SLOT_PRODUCTS, demo_layout  # noqa: E402
+
+DAYS = 30
+CAPACITY = 8                       # cans that fit side by side on one shelf slot
+# How often a browser picks this shelf's can up (and puts it back)
+BROWSE_INTEREST = {"A1": 0.08, "A2": 0.45, "A3": 0.03, "B1": 0.06, "B2": 0.07, "B3": 0.04}
+NEGLECTED = {"B3": 3, "B1": 1}     # slot -> refills skipped for the last N days (shelves running low now)
+
+
+def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 7) -> int:
+    rnd = random.Random(seed)
+    cur = conn.cursor()
+    cur.executescript(CAMERA_TABLES_SQL)
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(security_events);").fetchall()]
+    if "source" not in cols:
+        cur.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
+    for table in ("visits", "shelf_events", "shelf_status"):
+        cur.execute(f"DELETE FROM {table} WHERE source = 'sample';")
+    cur.execute("DELETE FROM security_events WHERE event_type = 'UNPAID_EXIT' AND source = 'sample';")
+
+    latest = cur.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales;").fetchone()[0]
+    if not latest:
+        return 0
+    today = datetime.strptime(latest, "%Y-%m-%d")
+    start = today - timedelta(days=days - 1)
+
+    # Shelf slots -> products (same shelves as the demo shop)
+    pid = {}
+    for sid, shade, size in DEMO_SLOT_PRODUCTS:
+        row = cur.execute("SELECT id FROM products WHERE shade_name = ? AND pack_size_litres = ?;", (shade, size)).fetchone()
+        if row:
+            pid[sid] = int(row[0])
+    slot_of = {p: s for s, p in pid.items()}
+    names = {s["id"]: s["name"] for s in demo_layout()["shelves"]}
+
+    level = {sid: CAPACITY for sid in pid}
+    first = start.replace(hour=9)
+    for sid in pid:
+        cur.execute("INSERT INTO shelf_status (source, slot_id, slot_name, product_id, cans, capacity, updated_at) "
+                    "VALUES ('sample', ?, ?, ?, ?, ?, ?);",
+                    (sid, names.get(sid, sid), pid[sid], CAPACITY, CAPACITY, first.strftime("%Y-%m-%d %H:%M:%S")))
+
+    events, visits = [], []
+
+    def ev(at, sid, kind, qty):
+        events.append(("sample", at.strftime("%Y-%m-%d %H:%M:%S"), sid, pid[sid], kind, qty))
+
+    # Walk-outs: (days ago, hour, slot, cans, status)
+    walkouts = {(0, 10): ("B2", 1, "NEW"), (2, 18): ("B3", 1, "SEEN"), (9, 12): ("B1", 2, "FALSE_ALARM"),
+                (17, 19): ("A2", 1, "RESOLVED")}
+
+    day = start
+    while day <= today:
+        ago = (today - day).days
+        recent_boost = 2.5 if ago < 7 else 1.0          # more people picking up Royale Blue this week
+        # morning refill
+        for sid in pid:
+            skip = sid in NEGLECTED and NEGLECTED[sid] > 0 and ago < NEGLECTED[sid]
+            if not skip and level[sid] < CAPACITY:
+                ev(day.replace(hour=9, minute=10), sid, "restock", CAPACITY - level[sid])
+                level[sid] = CAPACITY
+        ds = day.strftime("%Y-%m-%d")
+        foot = cur.execute("SELECT timestamp, count_in, dwell_time_mins FROM footfall_logs "
+                           "WHERE DATE(timestamp) = ? AND COALESCE(source,'sample') = 'sample' ORDER BY timestamp;",
+                           (ds,)).fetchall()
+        for ts, visitors, dwell in foot:
+            hour_start = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            hr = hour_start.hour
+            if hr == 15:      # afternoon top-up of nearly empty shelves (not B1 today)
+                for sid in pid:
+                    if level[sid] <= 2 and not (sid in NEGLECTED and ago < NEGLECTED[sid]):
+                        ev(hour_start.replace(minute=5), sid, "restock", CAPACITY - level[sid])
+                        level[sid] = CAPACITY
+            bills = cur.execute(
+                "SELECT invoice_no, MIN(sale_timestamp) FROM sales WHERE sale_timestamp >= ? AND sale_timestamp < ? "
+                "GROUP BY invoice_no;", (ts, (hour_start + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"))).fetchall()
+            lines = defaultdict(list)
+            for inv, p, q, size in cur.execute(
+                    "SELECT s.invoice_no, s.product_id, s.quantity, p.pack_size_litres FROM sales s JOIN products p "
+                    "ON p.id = s.product_id WHERE s.sale_timestamp >= ? AND s.sale_timestamp < ?;",
+                    (ts, (hour_start + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"))).fetchall():
+                lines[inv].append((p, q, size))
+            wo = walkouts.get((ago, hr))
+            n_visitors = max(int(visitors), len(bills) + (1 if wo else 0))
+            buyers = sorted(bills, key=lambda b: b[1])
+            for k in range(n_visitors):
+                if k < len(buyers):
+                    inv, paid_at = buyers[k]
+                    paid = datetime.strptime(paid_at, "%Y-%m-%d %H:%M:%S")
+                    stay = max(4.0, rnd.gauss(dwell or 14, 4))
+                    entered = paid - timedelta(minutes=stay * 0.75)
+                    left = paid + timedelta(minutes=stay * 0.25)
+                    shelves, picked, back = set(), 0, 0
+                    for p, q, size in lines[inv]:
+                        sid = slot_of.get(p)
+                        if sid and size <= 4:
+                            shelves.add(sid)
+                            take = min(q, level[sid])
+                            if take:
+                                ev(entered + timedelta(minutes=stay * 0.4), sid, "pick", take)
+                                level[sid] -= take
+                                picked += take
+                    if not shelves and rnd.random() < 0.4:
+                        shelves.add(rnd.choice(list(pid)))
+                    visits.append(("sample", entered, left, True, shelves, picked, back, "reached_counter"))
+                    continue
+                entered = hour_start + timedelta(minutes=rnd.uniform(0, 50))
+                stay = max(2.0, rnd.gauss((dwell or 14) * 0.6, 3))
+                left = entered + timedelta(minutes=stay)
+                if wo and k == len(buyers):
+                    sid, n, _ = wo
+                    take = min(n, level[sid])
+                    ev(entered + timedelta(minutes=stay * 0.5), sid, "pick", take)
+                    level[sid] -= take
+                    visits.append(("sample", entered, left, False, {sid}, take, 0, "unpaid_exit"))
+                    continue
+                shelves, back = set(), 0
+                if rnd.random() < 0.7:
+                    for sid in rnd.sample(list(pid), k=rnd.choice([1, 1, 2])):
+                        shelves.add(sid)
+                        p_pick = BROWSE_INTEREST.get(sid, 0.1) * (recent_boost if sid == "B2" else 1.0)
+                        if level[sid] > 0 and rnd.random() < p_pick:
+                            at = entered + timedelta(minutes=stay * 0.4)
+                            ev(at, sid, "pick", 1)
+                            ev(at + timedelta(minutes=1), sid, "put_back", 1)
+                            back += 1
+                counter = rnd.random() < 0.15        # asked something at the counter, didn't buy
+                visits.append(("sample", entered, left, counter, shelves, 0, back,
+                               "reached_counter" if counter else "browsed"))
+        day += timedelta(days=1)
+
+    cur.executemany("INSERT INTO shelf_events (source, at, slot_id, product_id, kind, qty) VALUES (?, ?, ?, ?, ?, ?);",
+                    events)
+    cur.executemany(
+        "INSERT INTO visits (source, entered_at, left_at, dwell_s, reached_counter, shelves, picked, put_back, outcome) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        [(src, a.strftime("%Y-%m-%d %H:%M:%S"), b.strftime("%Y-%m-%d %H:%M:%S"), (b - a).total_seconds(), int(c),
+          ",".join(sorted(sh)), pk, bk, out) for src, a, b, c, sh, pk, bk, out in visits])
+
+    labels = {sid: f"{shade} {size:g} L" for sid, shade, size in DEMO_SLOT_PRODUCTS}
+    for (ago, hr), (sid, n, status) in walkouts.items():
+        at = (today - timedelta(days=ago)).replace(hour=hr, minute=37, second=12)
+        cur.execute(
+            "INSERT INTO security_events (timestamp, event_type, zone, severity, status, details, source) "
+            "VALUES (?, 'UNPAID_EXIT', 'Front door', 'CRITICAL', ?, ?, 'sample');",
+            (at.strftime("%Y-%m-%d %H:%M:%S"), status,
+             f"Someone took {n} × {labels[sid]} ({names.get(sid, sid)}) and left at {at.strftime('%I:%M %p').lstrip('0')} "
+             f"without going to the counter."))
+    conn.commit()
+    return len(visits)
+
+
+if __name__ == "__main__":
+    from src.config import DB_PATH
+
+    with sqlite3.connect(DB_PATH) as c:
+        n = seed_camera_history(c)
+    print(f"Added {n} sample camera visits to {DB_PATH}")

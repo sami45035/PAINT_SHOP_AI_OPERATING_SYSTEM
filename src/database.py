@@ -24,6 +24,13 @@ def _day(d: Optional[date]) -> date:
     return d or clock.today()
 
 
+# Which door counts make "visitors": a real camera's on days it ran, otherwise
+# the sample history. Demo-shop counts never count as visitors.
+VISITOR_ROWS = ("(footfall_logs.source = 'camera' OR (COALESCE(footfall_logs.source, 'sample') = 'sample' "
+                "AND NOT EXISTS (SELECT 1 FROM footfall_logs f2 WHERE f2.source = 'camera' "
+                "AND DATE(f2.timestamp) = DATE(footfall_logs.timestamp))))")
+
+
 def _upto() -> str:
     """Nothing after this moment counts (sample data has rows for later today)."""
     return clock.now_naive().strftime("%Y-%m-%d %H:%M:%S")
@@ -52,8 +59,18 @@ def ensure_demo_dates_current() -> int:
             return 0
         mod = f"+{delta} days"
         cur.execute("UPDATE sales SET sale_timestamp = DATETIME(sale_timestamp, ?);", (mod,))
-        cur.execute("UPDATE footfall_logs SET timestamp = DATETIME(timestamp, ?);", (mod,))
-        cur.execute("UPDATE security_events SET timestamp = DATETIME(timestamp, ?);", (mod,))
+        # Only seeded rows move; what a real camera counted stays on its real day
+        cur.execute("UPDATE footfall_logs SET timestamp = DATETIME(timestamp, ?) "
+                    "WHERE COALESCE(source, 'sample') = 'sample';", (mod,))
+        cur.execute("UPDATE security_events SET timestamp = DATETIME(timestamp, ?) "
+                    "WHERE COALESCE(source, 'sample') = 'sample';", (mod,))
+        try:   # seeded camera history moves with the sales it matches
+            cur.execute("UPDATE visits SET entered_at = DATETIME(entered_at, ?), left_at = DATETIME(left_at, ?) "
+                        "WHERE source = 'sample';", (mod, mod))
+            cur.execute("UPDATE shelf_events SET at = DATETIME(at, ?) WHERE source = 'sample';", (mod,))
+            cur.execute("UPDATE shelf_status SET updated_at = DATETIME(updated_at, ?) WHERE source = 'sample';", (mod,))
+        except sqlite3.OperationalError:
+            pass   # older database without camera tables
         cur.execute(
             "UPDATE inventory SET purchase_date = DATE(purchase_date, ?), expiry_date = DATE(expiry_date, ?);",
             (mod, mod),
@@ -145,7 +162,8 @@ def _day_totals(cur, d: date, until_time: str = "23:59:59") -> Dict[str, float]:
         (ds, cap),
     ).fetchone()
     visitors = cur.execute(
-        "SELECT COALESCE(SUM(count_in), 0) FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ?;",
+        f"SELECT COALESCE(SUM(count_in), 0) FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ? "
+        f"AND {VISITOR_ROWS};",
         (ds, cap),
     ).fetchone()[0]
     return {
@@ -245,10 +263,10 @@ def get_daily_sales_timeseries(days: int = 45, on_day: Optional[date] = None) ->
 def get_hourly_traffic(on_day: Optional[date] = None) -> pd.DataFrame:
     """Visitors and bills for each opening hour of one day."""
     ds = _day(on_day).strftime("%Y-%m-%d")
-    query = """
+    query = f"""
     WITH v AS (
         SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hour, SUM(count_in) AS visitors
-        FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ? GROUP BY hour
+        FROM footfall_logs WHERE DATE(timestamp) = ? AND timestamp <= ? AND {VISITOR_ROWS} GROUP BY hour
     ),
     b AS (
         SELECT CAST(strftime('%H', sale_timestamp) AS INTEGER) AS hour,
@@ -274,10 +292,10 @@ def get_daily_traffic(days: int = 14, on_day: Optional[date] = None) -> pd.DataF
     ref = _day(on_day)
     start = (ref - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     end = ref.strftime("%Y-%m-%d")
-    query = """
+    query = f"""
     WITH v AS (
         SELECT DATE(timestamp) AS day, SUM(count_in) AS visitors
-        FROM footfall_logs WHERE DATE(timestamp) BETWEEN ? AND ? AND timestamp <= ? GROUP BY day
+        FROM footfall_logs WHERE DATE(timestamp) BETWEEN ? AND ? AND timestamp <= ? AND {VISITOR_ROWS} GROUP BY day
     ),
     b AS (
         SELECT DATE(sale_timestamp) AS day, COUNT(DISTINCT invoice_no) AS bills
@@ -298,7 +316,7 @@ def get_footfall_pos_fusion(days: int = 14, on_day: Optional[date] = None) -> pd
     ref = _day(on_day)
     start = (ref - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     end = ref.strftime("%Y-%m-%d")
-    query = """
+    query = f"""
     WITH hourly_sales AS (
         SELECT strftime('%Y-%m-%d %H:00:00', sale_timestamp) as hour_slot,
                COUNT(DISTINCT invoice_no) as transactions,
@@ -310,7 +328,7 @@ def get_footfall_pos_fusion(days: int = 14, on_day: Optional[date] = None) -> pd
         SELECT strftime('%Y-%m-%d %H:00:00', timestamp) as hour_slot,
                SUM(count_in) as visitors, MAX(occupancy) as occupancy, AVG(dwell_time_mins) as dwell_time_mins
         FROM footfall_logs
-        WHERE DATE(timestamp) BETWEEN ? AND ?
+        WHERE DATE(timestamp) BETWEEN ? AND ? AND {VISITOR_ROWS}
         GROUP BY hour_slot
     )
     SELECT t.hour_slot, t.visitors,
@@ -390,22 +408,25 @@ def get_season_status(on_day: Optional[date] = None) -> Dict[str, Any]:
 
 # --- Security events & visitor logging ----------------------------------------------
 
-def get_recent_security_events(limit: int = 10) -> pd.DataFrame:
+def get_recent_security_events(limit: int = 10, include_demo: bool = False) -> pd.DataFrame:
+    """Newest first. Demo-feed events are left out unless asked for."""
+    where = "" if include_demo else "WHERE COALESCE(source, 'sample') != 'demo'"
     with sqlite3.connect(DB_PATH) as conn:
         return pd.read_sql_query(
-            "SELECT * FROM security_events ORDER BY timestamp DESC LIMIT ?;", conn, params=(limit,)
+            f"SELECT * FROM security_events {where} ORDER BY timestamp DESC LIMIT ?;", conn, params=(limit,)
         )
 
 
-def log_security_event(event_type: str, zone: str, severity: str, details: str, at: Optional[datetime] = None) -> int:
+def log_security_event(event_type: str, zone: str, severity: str, details: str, at: Optional[datetime] = None,
+                       source: str = "camera") -> int:
     ts = (at or clock.now_naive()).strftime("%Y-%m-%d %H:%M:%S")
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO security_events (timestamp, event_type, zone, severity, status, details)
-            VALUES (?, ?, ?, ?, 'NEW', ?);
+            INSERT INTO security_events (timestamp, event_type, zone, severity, status, details, source)
+            VALUES (?, ?, ?, ?, 'NEW', ?, ?);
             """,
-            (ts, event_type, zone, severity, details),
+            (ts, event_type, zone, severity, details, source),
         )
         conn.commit()
         return cur.lastrowid
@@ -465,12 +486,71 @@ def log_footfall_entry(count_in: int, count_out: int, occupancy: int, dwell_mins
 
 # --- App tables (created on startup if missing) ----------------------------------
 
+# What the shop camera learns. `source` keeps the three kinds of data apart:
+#   'camera' = a real camera (webcam, ESP32-CAM, browser camera)
+#   'demo'   = the drawn demo shop (examples only, cleared from the screen)
+#   'sample' = seeded history, so the screens have something to show on day one
+CAMERA_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS visits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    entered_at TEXT NOT NULL,
+    left_at TEXT NOT NULL,
+    dwell_s REAL NOT NULL,
+    reached_counter INTEGER NOT NULL,      -- stood at the billing counter
+    shelves TEXT,                          -- shelf slots visited, comma separated
+    picked INTEGER NOT NULL DEFAULT 0,     -- cans taken off shelves (net of put-backs)
+    put_back INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL                  -- reached_counter | browsed | unpaid_exit
+);
+CREATE INDEX IF NOT EXISTS ix_visits_src_day ON visits (source, entered_at);
+CREATE TABLE IF NOT EXISTS shelf_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    at TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    product_id INTEGER,
+    kind TEXT NOT NULL,                    -- pick | put_back | restock
+    qty INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_shelf_src_day ON shelf_events (source, at);
+CREATE TABLE IF NOT EXISTS shelf_status (
+    source TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    slot_name TEXT NOT NULL,
+    product_id INTEGER,
+    cans INTEGER NOT NULL,
+    capacity INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (source, slot_id)
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
 def ensure_app_tables() -> None:
     """Small tables the app writes to (kept separate from the seeded data)."""
     with get_connection() as conn:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(footfall_logs);").fetchall()]
         if "source" not in cols:   # older databases: tell camera counts apart from sample data
             conn.execute("ALTER TABLE footfall_logs ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
+        sec_cols = [r[1] for r in conn.execute("PRAGMA table_info(security_events);").fetchall()]
+        if "source" not in sec_cols:
+            conn.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
+        conn.executescript(CAMERA_TABLES_SQL)
+        has_sample = conn.execute("SELECT 1 FROM visits WHERE source = 'sample' LIMIT 1;").fetchone()
+        if DEMO_MODE and not has_sample and conn.execute("SELECT 1 FROM sales LIMIT 1;").fetchone():
+            import sys as _sys
+
+            _sys.path.insert(0, str(DB_PATH.parent))     # data/seed_camera.py
+            try:
+                from seed_camera import seed_camera_history
+            except ImportError:
+                seed_camera_history = None
+            if seed_camera_history is not None:
+                seed_camera_history(conn)                 # older database: add the sample camera history once
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS alert_actions (
@@ -508,3 +588,82 @@ def mark_ordered(product_id: int, qty: int) -> None:
     with get_connection() as conn:
         conn.execute("UPDATE inventory SET on_order = on_order + ? WHERE product_id = ?;", (int(qty), int(product_id)))
         conn.commit()
+
+
+# --- Shop camera: visits, shelves, settings ------------------------------------------
+
+def get_setting(key: str, default: Any = None) -> Any:
+    import json
+
+    try:
+        with get_connection() as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key = ?;", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    if not row:
+        return default
+    try:
+        return json.loads(row[0])
+    except ValueError:
+        return default
+
+
+def set_setting(key: str, value: Any) -> None:
+    import json
+
+    with get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?);", (key, json.dumps(value)))
+        conn.commit()
+
+
+def log_visit(source: str, entered_at: datetime, left_at: datetime, reached_counter: bool, shelves: List[str],
+              picked: int, put_back: int, outcome: str) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO visits (source, entered_at, left_at, dwell_s, reached_counter, shelves, picked, put_back, outcome) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            (source, entered_at.strftime("%Y-%m-%d %H:%M:%S"), left_at.strftime("%Y-%m-%d %H:%M:%S"),
+             max(0.0, (left_at - entered_at).total_seconds()), int(bool(reached_counter)), ",".join(shelves),
+             int(picked), int(put_back), outcome),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def log_shelf_event(source: str, slot_id: str, product_id: Optional[int], kind: str, qty: int,
+                    at: Optional[datetime] = None) -> None:
+    ts = (at or clock.now_naive()).strftime("%Y-%m-%d %H:%M:%S")
+    with get_connection() as conn:
+        conn.execute("INSERT INTO shelf_events (source, at, slot_id, product_id, kind, qty) VALUES (?, ?, ?, ?, ?, ?);",
+                     (source, ts, slot_id, product_id, kind, int(qty)))
+        conn.commit()
+
+
+def set_shelf_status(source: str, slot_id: str, slot_name: str, product_id: Optional[int], cans: int, capacity: int,
+                     at: Optional[datetime] = None) -> None:
+    ts = (at or clock.now_naive()).strftime("%Y-%m-%d %H:%M:%S")
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO shelf_status (source, slot_id, slot_name, product_id, cans, capacity, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?);",
+            (source, slot_id, slot_name, product_id, int(cans), int(capacity), ts))
+        conn.commit()
+
+
+def clear_camera_data(source: str) -> None:
+    """Forget everything one source recorded (used for 'Clear demo run')."""
+    with get_connection() as conn:
+        for table in ("visits", "shelf_events", "shelf_status", "security_events"):
+            conn.execute(f"DELETE FROM {table} WHERE source = ?;", (source,))
+        conn.execute("DELETE FROM footfall_logs WHERE source = ?;", (source,))
+        conn.commit()
+
+
+def camera_sources_with_data(on_day: Optional[date] = None) -> List[str]:
+    """Which sources recorded visits or door counts on this day."""
+    ds = _day(on_day).strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT source FROM footfall_logs WHERE DATE(timestamp) = ? "
+            "UNION SELECT DISTINCT source FROM visits WHERE DATE(entered_at) = ?;", (ds, ds)).fetchall()
+    return sorted(r[0] for r in rows)

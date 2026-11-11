@@ -14,6 +14,7 @@ from pathlib import Path
 # Add project root to sys.path
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
+sys.path.insert(0, str(BASE_DIR / "data"))
 
 from src.config import DB_PATH, SHADES_CATALOG_PATH
 from src.clock import today as store_today
@@ -110,7 +111,8 @@ def init_db():
         zone TEXT NOT NULL,
         severity TEXT NOT NULL,
         status TEXT NOT NULL,
-        details TEXT
+        details TEXT,
+        source TEXT NOT NULL DEFAULT 'sample'
     );
     """)
 
@@ -377,7 +379,12 @@ def populate_database(conn):
     """, security_data)
     conn.commit()
 
+    # 7. Sample shop-camera history (visits, shelf picks, walk-outs) matching the sales above
+    from seed_camera import seed_camera_history
+    n_visits = seed_camera_history(conn)
+
     print(f"Successfully initialized and populated database at {DB_PATH}")
+    print(f"Sample camera visits: {n_visits}")
     print(f"Total Products: {len(products_inserted)}")
     print(f"Total Sales Records: {cursor.execute('SELECT COUNT(*) FROM sales;').fetchone()[0]}")
     print(f"Total Footfall Logs: {cursor.execute('SELECT COUNT(*) FROM footfall_logs;').fetchone()[0]}")

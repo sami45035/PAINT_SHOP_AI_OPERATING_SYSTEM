@@ -127,6 +127,46 @@ def tool_recommend_colour(query: str) -> str:
     return "\n".join(lines)
 
 
+def tool_camera_summary(topic: str = "all") -> str:
+    """What the shop camera saw: buyers, shelves, fast movers, theft."""
+    from src import shop_insights as si
+    from src.formatting import rupees
+
+    src = si.best_source()
+    note = "" if src == "camera" else " *(sample camera history)*"
+    out = []
+    if topic in ("all", "buyers"):
+        b = si.buyers(src)
+        line = f"**Visitors today{note}:** {b['visitors']} came in"
+        if b["bills"] is not None and b["visitors"]:
+            line += f", {b['bills']} bills — **{b['bought_pct']:.0f}% bought**"
+        line += f"; {b['left_without_counter']} of {b['finished_visits']} finished visits never reached the counter."
+        out.append(line)
+        for w in b["weak_hours"][:2]:
+            out.append(f"- {w['label']}: {w['visitors']} came in, only {w['bills']} bought.")
+    if topic in ("all", "shelves"):
+        po = si.preorder(src)
+        if po["refill"]:
+            out.append("**Refill now:** " + " ".join(r["message"] for r in po["refill"][:3]))
+        else:
+            out.append("**Shelves:** every watched shelf is stocked.")
+        watched = [o for o in po["order"] if o["watched"]][:3]
+        for o in watched:
+            out.append(f"- Pre-order **{o['label']}**: {o['qty']} cans — {o['when'].lower()}. {o['message']}")
+    if topic in ("all", "movers"):
+        fm = si.fast_movers(src, 7)
+        top = fm["top"].head(3)
+        if not top.empty:
+            out.append("**Fastest movers this week:** " + ", ".join(f"{r.label} ({int(r.units)} cans)" for r in top.itertuples()))
+        for h in fm["hesitant"][:1]:
+            out.append(f"**Picked up but not bought:** {h['label']} — {h['message']}")
+    if topic in ("all", "theft"):
+        th = si.theft(src)
+        out.append(f"**Theft checks:** {th['walkouts_today']} walk-out(s) with a can today, {th['open']} alert(s) to check this week"
+                   + (f", shelf-vs-till gap {rupees(th['unbilled_value'])} today." if th["unbilled_value"] else "."))
+    return "\n".join(out)
+
+
 def _deal_help() -> str:
     return (
         "Use **Stock & Reorder → Deal Checker** for supplier offers. Enter the product, the offered price per can, "
@@ -142,6 +182,14 @@ def deterministic_assistant_response(user_message: str) -> str:
     if any(k in msg for k in ("running low", "run out", "running out", "low stock", "low on", "reorder", "order", "restock")) \
             or re.search(r"\blow\b", msg):
         return tool_get_urgent_restock()
+    if any(k in msg for k in ("theft", "steal", "stolen", "shoplift", "walk out", "walk-out", "unpaid", "security")):
+        return tool_camera_summary("theft")
+    if any(k in msg for k in ("shelf", "shelves", "refill")):
+        return tool_camera_summary("shelves")
+    if any(k in msg for k in ("fast mov", "fast-mov", "best sell", "moving", "picked up", "put back")):
+        return tool_camera_summary("movers")
+    if any(k in msg for k in ("bought", "buying", "customers", "conversion", "footfall", "visitor", "camera")):
+        return tool_camera_summary("buyers")
     if any(k in msg for k in ("alert", "expir", "slow", "stuck", "attention", "problem", "issue")):
         return tool_get_active_alerts()
     if any(k in msg for k in ("today", "sales", "revenue", "kpi", "visitor", "footfall", "conversion", "how did we do", "summary")):
@@ -156,6 +204,7 @@ def deterministic_assistant_response(user_message: str) -> str:
         "- **Reorders** — *What should I order today?*\n"
         "- **Alerts** — *What needs attention?*\n"
         "- **Today's numbers** — *How did we do today?*\n"
+        "- **Camera** — *How many customers bought today? Which shelf needs refilling? Any theft?*\n"
         "- **Colours** — *Suggest a calm bedroom colour*"
     )
 
@@ -166,8 +215,16 @@ def _live_context() -> str:
                            for e in season["active"]) or "none"
     return (
         f"[TODAY]\n{tool_get_store_kpis()}\n\n[ACTIVE SEASON]\n{season_txt}\n\n"
-        f"[REORDER PLAN]\n{tool_get_urgent_restock()}\n\n[ALERTS]\n{tool_get_active_alerts()}"
+        f"[REORDER PLAN]\n{tool_get_urgent_restock()}\n\n[ALERTS]\n{tool_get_active_alerts()}\n\n"
+        f"[SHOP CAMERA]\n{_safe_camera()}"
     )
+
+
+def _safe_camera() -> str:
+    try:
+        return tool_camera_summary("all")
+    except Exception:  # noqa: BLE001
+        return "not available"
 
 
 def answer(user_message: str, chat_history: Optional[List[Dict[str, str]]] = None,

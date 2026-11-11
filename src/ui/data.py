@@ -67,3 +67,56 @@ def open_alerts(day_str: str):
 
 def clear_all():
     st.cache_data.clear()
+
+
+# --- Shop camera insights (short TTL: a live camera keeps adding rows) -------------
+CAM_TTL = 10
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_footfall(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.footfall(source)
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_buyers(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.buyers(source)
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_daily(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.daily_footfall(source, 14)
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_shelves(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.shelves(source)
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_fast_movers(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.fast_movers(source, 7)
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_preorder(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.preorder(source)
+
+
+@st.cache_data(ttl=CAM_TTL, show_spinner=False)
+def cam_theft(source: str, day_str: str):
+    from src import shop_insights as si
+
+    return si.theft(source)

@@ -202,22 +202,26 @@ class TestLayer4Alerts(unittest.TestCase):
 
 # --------------------------------------------------------------------- Layer 5
 class TestLayer5Camera(unittest.TestCase):
-    def test_demo_counts_without_touching_database(self):
+    def test_demo_counts_are_tagged_demo(self):
         import src.camera_stream as cs
 
         t = [1000.0]
         with mock.patch.object(cs.time, "time", side_effect=lambda: t[0]), \
-                mock.patch.object(cs, "log_footfall") as lf, mock.patch.object(cs, "log_security_event") as ls:
+                mock.patch.object(cs, "log_footfall") as lf, mock.patch.object(cs, "log_security_event") as ls, \
+                mock.patch.object(cs, "log_visit"), mock.patch.object(cs, "log_shelf_event"), \
+                mock.patch.object(cs, "set_shelf_status"), \
+                mock.patch.object(cs.StoreVisionEngine, "_save_snapshot", lambda *a, **k: "x.jpg"):
             eng = cs.StoreVisionEngine("demo")
             eng._demo_t0 = 1000.0
             self.assertTrue(eng.open_stream())
-            for _ in range(40):  # 20 seconds of demo
+            for _ in range(60):  # 30 seconds of demo
                 frame, m = eng.process_frame()
                 t[0] += 0.5
             self.assertGreaterEqual(m["entered"], 1)
             self.assertGreaterEqual(m["exited"], 1)
-            lf.assert_not_called()
-            ls.assert_not_called()
+            self.assertTrue(lf.called)
+            self.assertTrue(all(c.kwargs.get("source") == "demo" for c in lf.call_args_list))
+            self.assertTrue(all(c.kwargs.get("source") == "demo" for c in ls.call_args_list))
 
     def test_standing_on_the_line_is_not_counted_again_and_again(self):
         from src.camera_stream import StoreVisionEngine
