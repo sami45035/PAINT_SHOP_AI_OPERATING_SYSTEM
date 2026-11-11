@@ -5,6 +5,7 @@ All dates come from src.clock (store time zone). Nothing in this module is
 pinned to a fixed calendar date.
 """
 import sqlite3
+import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -16,7 +17,8 @@ from src.formatting import ratio
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    # wait up to 30 s for a writer (the camera) instead of failing straight away
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -58,33 +60,55 @@ def _usable(path) -> bool:
         return False
 
 
+_LIVE_LOCK = threading.Lock()
+_WAL_DONE = set()
+
+
 def ensure_live_db() -> bool:
     """
     Make sure the app's live database exists and is complete. It starts as a
     copy of the sample database (data/paint_shop.db). In demo mode, when the
     sample data in the repo changes (a new seed), the live copy is refreshed.
-    Returns True when the live database was (re)created.
+    Returns True when the live database was (re)created or repaired.
+
+    Several sessions start at once after a reboot (the health check and every
+    open tab), so this runs one at a time and copies through a unique temp file.
     """
     import shutil
+    import uuid
 
-    created = False
-    if not SAMPLE_DB_PATH.exists():
-        import subprocess
-        import sys as _sys
+    with _LIVE_LOCK:
+        created = False
+        if not SAMPLE_DB_PATH.exists():
+            import subprocess
+            import sys as _sys
 
-        subprocess.run([_sys.executable, str(SAMPLE_DB_PATH.parent / "seed_data.py")], check=True)
-    if DB_PATH != SAMPLE_DB_PATH:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        stale = DB_PATH.exists() and DEMO_MODE and _seed_id(SAMPLE_DB_PATH) not in (None, _seed_id(DB_PATH))
-        if not DB_PATH.exists() or stale:
-            tmp = DB_PATH.with_suffix(".tmp")
-            shutil.copy(SAMPLE_DB_PATH, tmp)
-            tmp.replace(DB_PATH)                 # atomic: a running page never sees half a file
+            subprocess.run([_sys.executable, str(SAMPLE_DB_PATH.parent / "seed_data.py")], check=True)
+        if DB_PATH != SAMPLE_DB_PATH:
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            stale = DB_PATH.exists() and DEMO_MODE and _seed_id(SAMPLE_DB_PATH) not in (None, _seed_id(DB_PATH))
+            if not DB_PATH.exists() or stale:
+                tmp = DB_PATH.with_name(f".{DB_PATH.name}.{uuid.uuid4().hex}.tmp")
+                shutil.copy(SAMPLE_DB_PATH, tmp)
+                for extra in ("-wal", "-shm"):          # leftovers of the old copy would confuse SQLite
+                    old = DB_PATH.with_name(DB_PATH.name + extra)
+                    if old.exists():
+                        old.unlink()
+                tmp.replace(DB_PATH)                     # atomic: a running page never sees half a file
+                _WAL_DONE.discard(str(DB_PATH))
+                created = True
+        if created or not _usable(DB_PATH):
+            ensure_app_tables()
             created = True
-    if created or not _usable(DB_PATH):
-        ensure_app_tables()
-        created = True
-    return created
+        if str(DB_PATH) not in _WAL_DONE:
+            # readers no longer wait for the camera's writes (and vice versa)
+            try:
+                with sqlite3.connect(DB_PATH, timeout=30) as conn:
+                    conn.execute("PRAGMA journal_mode=WAL;")
+            except sqlite3.Error:
+                pass
+            _WAL_DONE.add(str(DB_PATH))
+        return created
 
 
 # --- Demo data upkeep ---------------------------------------------------------

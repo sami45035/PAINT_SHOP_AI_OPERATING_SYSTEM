@@ -270,16 +270,21 @@ def generate_smart_alerts(on_day: Optional[date] = None) -> Dict[str, List[Dict[
     - anomalies:  days with many visitors but few bills
     - camera:     shelves to refill, walk-outs with unpaid cans, shelf-vs-till gaps
     """
+    from src.safety import guard
+
     ref = on_day or clock.today()
-    with sqlite3.connect(DB_PATH) as conn:
-        expiring = _expiry_alerts(conn, ref)
-        dead = _dead_stock_alerts(conn, ref)
+
+    def with_conn(fn):
+        with sqlite3.connect(DB_PATH, timeout=30) as conn:
+            return fn(conn, ref)
+
+    # each group on its own: one failing group must not hide the others (or crash the home page)
     return {
-        "critical": _low_stock_alerts(ref),
-        "expiring": expiring,
-        "dead_stock": dead,
-        "anomalies": _visitor_alerts(ref),
-        "camera": _camera_alerts(ref),
+        "critical": guard("Alerts · running out", _low_stock_alerts, ref, show=False, default=[]),
+        "expiring": guard("Alerts · expiring", with_conn, _expiry_alerts, show=False, default=[]),
+        "dead_stock": guard("Alerts · money stuck", with_conn, _dead_stock_alerts, show=False, default=[]),
+        "anomalies": guard("Alerts · visitors vs bills", _visitor_alerts, ref, show=False, default=[]),
+        "camera": guard("Alerts · camera", _camera_alerts, ref, show=False, default=[]),
     }
 
 

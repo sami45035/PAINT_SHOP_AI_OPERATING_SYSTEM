@@ -32,6 +32,7 @@ st.set_page_config(page_title="Apex Paint AI", page_icon="🎨", layout="wide", 
 from src import clock  # noqa: E402
 from src.config import DEMO_MODE, ESP32_DEFAULT_STREAM_URL, STORE_SHORT_NAME  # noqa: E402
 from src.ui import data, nav  # noqa: E402
+from src.safety import guard, last_errors  # noqa: E402
 from src.ui.theme import html, inject_css  # noqa: E402
 
 
@@ -106,11 +107,10 @@ def _live_db() -> None:
         ui_data.clear_all()
 
 
-_live_db()
-_prepare_database(clock.today_str())
+guard("Preparing the shop data", _live_db)
+guard("Preparing the shop data", _prepare_database, clock.today_str())
 inject_css()
-
-_log_versions()
+guard("Version log", _log_versions, show=False)
 
 pages = {
     "overview": st.Page(_overview, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
@@ -135,16 +135,13 @@ with st.sidebar:
     html(f'<div class="apx-pill" style="background:{bg};color:{fg};margin-bottom:12px">'
          f'<span class="apx-dot" style="background:{fg}"></span>{escape(clock.opening_label())}</div>')
 
-    try:
-        n_alerts = len(data.open_alerts(clock.today_str()))
-    except Exception:
-        n_alerts = 0
+    n_alerts = guard("Alert count", lambda: len(data.open_alerts(clock.today_str())), show=False, default=0)
     for key, page in pages.items():
         label = page.title + (f"  ·  {n_alerts}" if key == "alerts" and n_alerts else "")
         st.page_link(page, label=label, icon=page.icon)
 
     st.divider()
-    cam = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo feed"}[st.session_state.get("cam_source", "demo")]
+    cam = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}.get(st.session_state.get("cam_source", "demo"), "—")
     gem = bool(st.session_state.get("gemini_key") or os.getenv("GEMINI_API_KEY"))
     aura = "Gemini" if gem and st.session_state.get("aura_mode") == "Gemini" else "Offline mode"
     now = clock.now()
@@ -161,5 +158,14 @@ with st.sidebar:
         if st.button("Refresh data", use_container_width=True):
             data.clear_all()
             st.rerun()
+        def _problems():
+            errs = last_errors(5)
+            if errs:
+                st.caption(f"{len(errs)} problem(s) logged since the app started (also in data/live/errors.log):")
+                for e in errs:
+                    st.code(f"{e['when']} · {e['where']}\n{e['error']}", language=None)
+        guard("Problem list", _problems, show=False)
 
-current.run()
+# The page itself: an error shows a message on that page — it never takes the whole app down
+# (Streamlit Cloud's health check loads the home page; an uncaught error there means "Oh no").
+guard(getattr(current, "title", None) or "This page", current.run)

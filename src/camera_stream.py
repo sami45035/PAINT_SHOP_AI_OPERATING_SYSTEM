@@ -68,6 +68,7 @@ BLUE = (235, 140, 60)
 LOST_JOURNEY_S = 600.0     # a customer the camera lost and never saw leaving is closed after 10 minutes
 PRESENCE_CONFIRM_S = 1.5   # "people in view" mode: in view this long = a visitor (not someone walking past)
 PRESENCE_GONE_S = 4.0      # ... and out of view this long = left
+IDLE_STOP_S = 60.0         # the background reader stops when no screen has looked for a minute
 COUNT_MODES = {
     "presence": "People in view — camera at the counter or desk (counts each person it sees)",
     "door": "Door line — camera sees the whole doorway (counts feet crossing the line)",
@@ -178,6 +179,7 @@ class StoreVisionEngine:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.latest: Tuple[Optional[np.ndarray], Dict[str, Any]] = (None, {})
+        self._last_poll = time.time()
 
         self.hog = None
         if hasattr(cv2, "HOGDescriptor"):
@@ -262,17 +264,31 @@ class StoreVisionEngine:
         if not self.connected and not self.open_stream():
             return
         self._stop.clear()
+        self._last_poll = time.time()
 
         def loop():
             gap = 1.0 / fps
+            errors = 0
             while not self._stop.is_set():
+                if time.time() - self._last_poll > IDLE_STOP_S:
+                    break                           # nobody is watching: stop using the server's CPU
                 t0 = time.time()
-                frame = self.read_frame()
-                if frame is None:
-                    if self.source_type != "demo":
-                        break                       # camera gone: the screen shows the message
+                try:
+                    frame = self.read_frame()
+                    if frame is None:
+                        if self.source_type != "demo":
+                            break                   # camera gone: the screen shows the message
+                        continue
+                    annotated, metrics = self.process_frame(frame)
+                    errors = 0
+                except Exception as exc:  # noqa: BLE001 - one bad frame must not kill the camera
+                    errors += 1
+                    from src.safety import report
+
+                    if errors in (1, 10, 100):
+                        report(f"camera {self.source_type}", exc)
+                    self._stop.wait(min(5.0, 0.5 * errors))
                     continue
-                annotated, metrics = self.process_frame(frame)
                 with self._lock:
                     self.latest = (annotated, metrics)
                 self._stop.wait(max(0.0, gap - (time.time() - t0)))
@@ -281,7 +297,8 @@ class StoreVisionEngine:
         self._thread.start()
 
     def snapshot(self) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
-        """Latest analysed frame from the background reader."""
+        """Latest analysed frame from the background reader (also tells the reader someone is watching)."""
+        self._last_poll = time.time()
         with self._lock:
             return self.latest
 

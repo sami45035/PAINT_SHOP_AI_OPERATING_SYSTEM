@@ -9,7 +9,6 @@ Theft & safety  walk-outs with unpaid cans, shelf vs till, after-hours, staff-on
 Set up          place the door line, counter, staff-only area and shelf slots; calibrate shelves
 """
 import copy
-import traceback
 from datetime import datetime
 from html import escape
 from typing import Optional
@@ -44,18 +43,28 @@ EVENT_CHIP = {"door": ("info", "Door"), "pick": ("soon", "Picked"), "put_back": 
 
 
 # ----------------------------------------------------------------------------- engine
+@st.cache_resource(show_spinner=False)
+def _demo_engine() -> StoreVisionEngine:
+    """One demo shop for everyone using the app (one background reader, not one per browser tab)."""
+    eng = StoreVisionEngine(source_type="demo")
+    eng.open_stream()
+    return eng
+
+
 def _engine(source: str, url: str) -> StoreVisionEngine:
     key = (source, url if source == "esp32" else "")
     eng = SS.get("cam_engine")
     if eng is None or SS.get("cam_engine_key") != key:
-        if eng is not None:
-            eng.close_stream()
-        eng = StoreVisionEngine(source_type=source, esp32_url=url)
-        if eng.open_stream():
-            eng.start()                       # keeps reading and counting in the background
+        if eng is not None and eng.source_type != "demo":
+            eng.close_stream()                # the shared demo shop keeps running for others
+        if source == "demo":
+            eng = _demo_engine()
+        else:
+            eng = StoreVisionEngine(source_type=source, esp32_url=url)
+            eng.open_stream()
         SS["cam_engine"], SS["cam_engine_key"] = eng, key
-    elif eng.connected and not eng.running:
-        eng.start()
+    if eng.connected and not eng.running:
+        eng.start()                           # (re)starts the background reader; it stops itself when nobody watches
     return eng
 
 
@@ -154,6 +163,18 @@ def _live_server(eng: StoreVisionEngine) -> None:
         _right_now(eng, metrics)
 
 
+def _rerun_fragment() -> None:
+    """Rerun just the camera part; during a full-page run Streamlit refuses that, so rerun the page."""
+    try:
+        st.rerun(scope="fragment")
+    except Exception as exc:  # noqa: BLE001
+        from src.safety import is_control_flow
+
+        if is_control_flow(exc):
+            raise
+        st.rerun()
+
+
 @st.fragment
 def _live_browser(eng: StoreVisionEngine) -> None:
     """The camera of the device this page is open on, streamed by the browser (works on Streamlit Cloud)."""
@@ -172,7 +193,7 @@ def _live_browser(eng: StoreVisionEngine) -> None:
                 if m.get("security_alert"):
                     SS["cam_last_alert"] = m["security_alert"]
             SS["bc_ack"] = val["seq"]
-            st.rerun(scope="fragment")     # hand the boxes back and ask for the next frame
+            _rerun_fragment()              # hand the boxes back and ask for the next frame
     with right:
         _right_now(eng, SS.get("bc_metrics") or {})
 
@@ -639,11 +660,6 @@ def render() -> None:
 
 def _safely(name: str, fn, *args) -> None:
     """One tab failing must not take the others (or the live camera) down with it."""
-    try:
-        fn(*args)
-    except Exception as exc:  # noqa: BLE001
-        if "Rerun" in type(exc).__name__ or "Stop" in type(exc).__name__:
-            raise                       # st.rerun() / st.stop() are not errors
-        st.error(f"Something went wrong showing **{name}** ({type(exc).__name__}). The other tabs still work.")
-        with st.expander("Details for the developer"):
-            st.code(traceback.format_exc())
+    from src.safety import guard
+
+    guard(name, fn, *args)

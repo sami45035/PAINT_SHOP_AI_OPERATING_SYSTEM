@@ -48,6 +48,9 @@ Open `http://localhost:8501`.
 ### Where the data lives
 `data/paint_shop.db` is the **sample** database (in git). The app works on a **live copy** in `data/live/` (not in git), made from the sample on first start — so updating the code (or a redeploy on Streamlit Cloud) never overwrites the database under a running app or wipes what a camera recorded. To start fresh, delete `data/live/`. In demo mode, a newly seeded sample replaces the live copy automatically. Set `PAINT_SHOP_DB` to use a different file.
 
+### If something goes wrong
+Every screen runs inside a safety net (`src/safety.py`): an error shows a message on that screen with its details instead of taking the whole app down ("Oh no" on Streamlit Cloud). The last problems are listed under **Settings** in the sidebar and written to `data/live/errors.log` and the server log (lines starting `[apex] ERROR`).
+
 ### Demo mode
 The sample data is moved forward automatically so its last day is always "today" (expiry dates move with it). When the shop runs on real data, turn this off:
 

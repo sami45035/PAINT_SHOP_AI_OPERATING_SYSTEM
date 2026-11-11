@@ -205,6 +205,39 @@ class TestDoorLine(unittest.TestCase):
         self.assertEqual(total[0], 1)
 
 
+# ----------------------------------------------------------------------------- server load
+class TestBackgroundReader(unittest.TestCase):
+    def test_reader_stops_when_nobody_watches_and_survives_bad_frames(self):
+        import time as _t
+
+        import src.camera_stream as cs
+
+        calls = {"n": 0}
+
+        def flaky(self, frame=None):
+            calls["n"] += 1
+            if calls["n"] % 3 == 0:
+                raise RuntimeError("bad frame")          # e.g. database busy for a moment
+            return np.zeros((10, 10, 3), np.uint8), {}
+
+        with mock.patch.object(cs, "IDLE_STOP_S", 0.6), mock.patch.object(cs.StoreVisionEngine, "process_frame", flaky), \
+                mock.patch("src.safety.report"):
+            eng = cs.StoreVisionEngine("demo", log_to_db=False)
+            eng.open_stream()
+            eng.start(fps=50)
+            _t.sleep(0.3)
+            self.assertTrue(eng.running)
+            eng.snapshot()                                 # someone looks at the screen
+            _t.sleep(0.4)
+            self.assertTrue(eng.running)                   # still watched: keeps going despite bad frames
+            _t.sleep(1.0)
+            self.assertFalse(eng.running)                  # nobody looked for > 0.6 s: stopped by itself
+            self.assertGreaterEqual(calls["n"], 4)               # kept reading after the bad frames
+            eng.start(fps=50)                              # comes back when the screen is opened again
+            self.assertTrue(eng.running)
+            eng.close_stream()
+
+
 # ----------------------------------------------------------------------------- footfall: people in view (webcam)
 class TestPeopleInView(unittest.TestCase):
     """A webcam at the counter: each person who stays in view is a visit; a missed frame isn't a new visitor."""
