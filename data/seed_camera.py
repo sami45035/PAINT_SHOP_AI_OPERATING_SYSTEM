@@ -30,8 +30,8 @@ from src.shop_vision import DEMO_SLOT_PRODUCTS, demo_layout  # noqa: E402
 DAYS = 30
 CAPACITY = 8                       # cans that fit side by side on one shelf slot
 # How often a browser picks this shelf's can up (and puts it back)
-BROWSE_INTEREST = {"A1": 0.08, "A2": 0.45, "A3": 0.03, "B1": 0.06, "B2": 0.07, "B3": 0.04}
-NEGLECTED = {"B3": 3, "B1": 1}     # slot -> refills skipped for the last N days (shelves running low now)
+BROWSE_INTEREST = {"A1": 0.08, "A2": 0.45, "A3": 0.03, "B1": 0.06, "B2": 0.05, "B3": 0.04}
+NEGLECTED = {"B1": 4, "B3": 6}     # slot -> refills skipped for the last N days (shelves running low now)
 
 
 def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 7) -> int:
@@ -79,7 +79,7 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
     day = start
     while day <= today:
         ago = (today - day).days
-        recent_boost = 2.5 if ago < 7 else 1.0          # more people picking up Royale Blue this week
+        recent_boost = 3.0 if ago < 7 else 1.0          # more people picking up Royale Blue this week
         # morning refill
         for sid in pid:
             skip = sid in NEGLECTED and NEGLECTED[sid] > 0 and ago < NEGLECTED[sid]

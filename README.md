@@ -9,6 +9,7 @@
 | Screen | Question it answers | Layer |
 |---|---|---|
 | **Overview** | How is the shop doing today? | L1 data · L2 dashboard |
+| **Sales Forecast** | What will sell in the next 30 days — and can I trust the forecast? | L3 |
 | **Colour Studio** | How will this shade look on the customer's wall? | L6 |
 | **Stock & Reorder** (+ Deal Checker) | What should I order, how much, and by when? Is this supplier offer worth it? | L3 |
 | **Alerts** | What needs my attention right now? | L4 |
@@ -21,7 +22,7 @@
 |---|---|---|
 | 1 · Shop data | `src/database.py`, `data/seed_data.py` | SQLite: products, inventory batches, suppliers, sales, hourly visitors, security events, season calendar. All dates come from `src/clock.py` (store time zone, India by default). |
 | 2 · Overview | `src/ui/pages/overview.py`, `src/dashboard_views.py` | KPIs, sales trend, visitors vs bills by hour. Conversion = bills ÷ visitors for the day. |
-| 3 · Forecast & reorder | `src/predictor.py` | Seasonally-adjusted 30-day moving average: the season effect is removed from past sales, then re-applied day by day going forward (a festival ending on 15 Nov only boosts demand until 15 Nov). Order quantity respects supplier lead time and minimum order. |
+| 3 · AI sales forecast & reorder | `src/sales_forecast.py`, `src/predictor.py` | Per product group, a ridge regression on six months of daily sales learns the weekday pattern, the real effect of each festival in the calendar (the calendar's multiplier is only a starting guess) and the trend; forecasts are split across products by recent share. Backtested against the simple 30-day average on periods it never saw. Reorder quantities and dates use the same forecast, with supplier lead time and minimum order. |
 | 4 · Alerts | `src/smart_alerts.py` | Running out before the supplier can deliver, batches expiring within 45 days, money stuck in slow sellers, days with many visitors but few bills. |
 | 5 · Store Camera | `src/camera_stream.py`, `src/shop_vision.py`, `src/shop_insights.py` | The camera as a data source. People detection (HOG) and tracking; door-line footfall; each customer's journey (shelves visited, cans taken / put back, reached the counter); can counting on shelf slots; walk-out (unpaid can) alerts; insights that join all of it with sales, stock and the forecast. |
 | 6 · Colour Studio | `src/colour_studio/` | SegFormer (ADE20K) via ONNX Runtime finds walls and separates them from ceiling, doors, windows and furniture; walls are split at corners; light-preserving recolouring in linear RGB; room-aware shade suggestions; paint quantity planner. |
@@ -52,6 +53,16 @@ set PAINT_SHOP_DEMO_MODE=0
 ```
 
 ---
+
+## Sales Forecast
+
+The **Sales Forecast** screen shows the next 30 days (rupees or cans) with a likely range, festival periods, what will sell most, what the model learned (calendar guess vs your sales: e.g. Diwali 2.2× guessed, about 1.7× real for interior emulsion), the weekday pattern, a per-product view, and an honest accuracy test:
+
+- **Backtest:** fit only on sales before a cut-off, forecast the next 4 weeks without seeing them, compare with what sold — and with the usual shop method (average of the last 30 days).
+- **Repeated test:** the same over the last 10 two-week and four-week periods. On the sample data the AI forecast's totals are off by about 5–6% on average for two weeks (simple average: about 12%), closer in most periods.
+- A festival the history hasn't seen yet counts at half the calendar's guess until the shop's own sales confirm it.
+
+In demo mode the sample sales, camera history and the sample festival calendar move forward together, so the forecast keeps learning from aligned data.
 
 ## Colour Studio: the wall model
 

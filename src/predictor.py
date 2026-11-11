@@ -6,13 +6,17 @@ Answers:
 2. When must I order, given the supplier's lead time?
 3. Should the shop buy a discounted supplier clearance lot?
 
-Method (kept simple on purpose, as the project plan suggests):
-- Take the last 30 days of sales for each product.
-- Remove the season effect from that history (Diwali sales would otherwise be
-  counted twice), giving a "normal day" rate.
-- Walk forward day by day, multiplying the normal rate by whichever seasonal
-  events are active on THAT day — so a festival ending on 15 Nov only boosts
-  the forecast until 15 Nov.
+Method:
+- Daily demand per product comes from the AI sales predictor
+  (src/sales_forecast.py): a model fitted on six months of this shop's sales
+  that learns the weekday pattern, the real effect of each festival/season and
+  the trend, then splits each product group's demand by recent share.
+- Walking forward day by day with that demand gives the day the shelf runs
+  empty; with the supplier's lead time and minimum order that becomes "order
+  N cans by <day>". A festival ending on 15 Nov only lifts demand until 15 Nov.
+- If the model can't be fitted (e.g. almost no history) it falls back to the
+  simple method: last 30 days' average with the calendar's season effect
+  removed and re-applied day by day.
 """
 import math
 import sqlite3
@@ -109,11 +113,36 @@ def compute_sales_forecast(forecast_days: int = 30, on_day: Optional[date] = Non
             "future": _multiplier_series(cal, key.category, key.finish, future_days),
         }
 
+    # AI model: daily demand per product (falls back to the simple method below)
+    ai_demand: Dict[int, List[float]] = {}
+    ai_plain: Dict[int, float] = {}
+    ai_mult: Dict[int, float] = {}
+    try:
+        from src.sales_forecast import Forecaster, _event_factor, group_of, load_history
+
+        model = Forecaster.fit(load_history(ref), ref)
+        pred = model.forecast(len(future_days), ref + timedelta(days=1))
+        for pid, g in pred.groupby("product_id"):
+            ai_demand[int(pid)] = g.sort_values("day")["units"].tolist()
+        for r in df.itertuples(index=False):
+            gm = model.groups.get(group_of(r.category))
+            if gm is not None:
+                share = model.shares.get(int(r.product_id), 0.0)
+                ai_plain[int(r.product_id)] = gm.level * share
+                ai_mult[int(r.product_id)] = max(_event_factor(gm, d) for d in future_days[:7])
+    except Exception:  # noqa: BLE001 - too little history: use the simple method
+        ai_demand = {}
+
     rows = []
     for r in df.itertuples(index=False):
         m = cache[(r.category, r.finish)]
-        normal_rate = r.units_sold_30d / sum(m["past"])            # season-neutral cans/day
-        demand = [normal_rate * x for x in m["future"]]
+        if int(r.product_id) in ai_demand:
+            demand = ai_demand[int(r.product_id)]
+            normal_rate = ai_plain.get(int(r.product_id), sum(demand) / len(demand))
+            m = {**m, "future": [ai_mult.get(int(r.product_id), 1.0)] * len(demand)}
+        else:
+            normal_rate = r.units_sold_30d / sum(m["past"])            # season-neutral cans/day
+            demand = [normal_rate * x for x in m["future"]]
         f7, f30 = sum(demand[:7]), sum(demand[:30])
 
         # Days until the shelf is empty, walking forward with the daily demand

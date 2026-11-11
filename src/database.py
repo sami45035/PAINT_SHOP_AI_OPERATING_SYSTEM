@@ -42,9 +42,12 @@ def ensure_demo_dates_current() -> int:
     """
     In demo mode, move every seeded date forward so the newest sale is today.
 
-    Expiry dates, purchase dates, sales, visitor logs and security events all
-    shift by the same number of days, so "expires in 23 days" stays true.
-    The seasonal calendar is NOT shifted — Diwali is on a real date.
+    Expiry dates, purchase dates, sales, visitor logs, security events, camera
+    history AND the sample festival calendar all shift by the same number of
+    days, so "expires in 23 days" stays true and the Diwali rush in the sample
+    sales still lines up with Diwali in the calendar (the sales predictor
+    learns festival effects from that alignment). With real data (demo mode
+    off) nothing moves.
     Returns the number of days shifted (0 if already current or demo mode off).
     """
     if not DEMO_MODE:
@@ -75,6 +78,8 @@ def ensure_demo_dates_current() -> int:
             "UPDATE inventory SET purchase_date = DATE(purchase_date, ?), expiry_date = DATE(expiry_date, ?);",
             (mod, mod),
         )
+        cur.execute("UPDATE seasonal_calendar SET start_date = DATE(start_date, ?), end_date = DATE(end_date, ?);",
+                    (mod, mod))
         conn.commit()
         return delta
 

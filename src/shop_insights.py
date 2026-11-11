@@ -323,7 +323,7 @@ def preorder(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     for r in fc.to_dict("records"):
         pid = int(r["product_id"])
         f = factors.get(pid, 1.0)
-        rate = r["normal_daily_rate"] * r["seasonal_multiplier"] * f
+        rate = r["effective_velocity"] * f
         demand30 = r["forecast_30d"] * f
         have = r["current_stock"] + r["on_order"]
         days_left = r["current_stock"] / rate if rate > 0 else 999

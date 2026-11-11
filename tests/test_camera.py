@@ -238,10 +238,11 @@ class TestInsights(unittest.TestCase):
 
         with Frozen(20, 30):
             po = si.preorder("sample")
-        b3 = [r for r in po["refill"] if r["slot_id"] == "B3"]
-        self.assertTrue(b3)
-        self.assertGreater(b3[0]["move"], 0)
-        self.assertLessEqual(b3[0]["move"], b3[0]["store_room"])
+        self.assertTrue(po["refill"])                     # the sample history leaves a fast shelf short
+        for r in po["refill"]:
+            self.assertLessEqual(r["cans"], round(r["capacity"] * 0.3))
+            self.assertLessEqual(r["move"], r["store_room"])
+            self.assertLessEqual(r["cans"] + r["move"], r["capacity"])
 
     def test_picked_up_not_bought_and_rising_demand(self):
         from src import shop_insights as si

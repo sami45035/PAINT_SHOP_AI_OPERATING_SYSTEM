@@ -198,7 +198,8 @@ def populate_database(conn):
                 "pack_size": size_litres,
                 "cost": cost,
                 "price": price,
-                "category": shade["category"]
+                "category": shade["category"],
+                "finish": shade["finish"],
             })
     conn.commit()
 
@@ -277,11 +278,51 @@ def populate_database(conn):
     # "Many visitors, few bills" alert has something real to find.
     dip_days = {(today - timedelta(days=1)).date(), (today - timedelta(days=4)).date()}
 
+    # What festivals and seasons REALLY do to this shop's sales. The shop's calendar
+    # (seasonal_calendar, below) only has rough guesses — e.g. it says Diwali is 2.2x,
+    # in this shop it is nearer 1.8x for emulsions. The sales predictor learns the
+    # real effect from these sales.
+    from src.predictor import event_applies
+    REAL = [  # (start, end, impact text as in the calendar, shop-wide visitors x, product x)
+        ("2026-10-10", "2026-11-15", "Interior & Exterior Emulsions", 1.30, 1.45),
+        ("2026-09-01", "2026-10-15", "Waterproofing & Exterior Primer", 1.10, 2.10),
+        ("2026-11-20", "2027-01-15", "Luxury Sheen & Accent Shades", 1.10, 1.30),
+        ("2026-06-15", "2026-08-15", "Exterior Emulsion", 0.92, 0.45),
+    ]
+    REAL = [(datetime.strptime(a, "%Y-%m-%d").date(), datetime.strptime(b, "%Y-%m-%d").date(), imp, v, pm)
+            for a, b, imp, v, pm in REAL]
+    base_w = {}
+    for p in products_inserted:
+        w = 0.65 / len(popular_ids) if p["id"] in popular_ids else 0.35 / max(1, len(regular_ids))
+        base_w[p["id"]] = w * (0.03 if p["id"] in slow_ids else 1.0)
+    by_id = {p["id"]: p for p in products_inserted}
+    day_cache = {}
+
+    def day_weights(d):
+        if d not in day_cache:
+            active = [(imp, pm) for a, b, imp, v, pm in REAL if a <= d <= b]
+            ids = list(base_w)
+            ws = []
+            for pid in ids:
+                pr = by_id[pid]
+                m = 1.0
+                for imp, pm in active:
+                    if event_applies(pr["category"], pr["finish"], imp):
+                        m = max(m, pm) if pm >= 1 else min(m, pm)
+                if "Royale Blue" in pr["shade_name"] and (today.date() - d).days < 10:
+                    m *= 2.0          # Royale Blue is suddenly in demand (a viral home-makeover reel)
+                ws.append(base_w[pid] * m)
+            day_cache[d] = (ids, ws)
+        return day_cache[d]
+
     cur_date = start_date
     while cur_date <= today:
         date_str = cur_date.strftime("%Y-%m-%d")
         is_weekend = cur_date.weekday() >= 5
-        season_mult = 1.6 if cur_date.month in [10, 11] else (1.25 if cur_date.month in [8, 9] else 1.0)
+        season_mult = 1.0
+        for a, b, imp, v, pm in REAL:
+            if a <= cur_date.date() <= b:
+                season_mult *= v
 
         for hour in range(9, 21):
             is_peak = (11 <= hour <= 13) or (17 <= hour <= 20)
@@ -304,12 +345,8 @@ def populate_database(conn):
             """, (f"{date_str} {hour:02d}:00:00", visitors, count_out, occupancy, dwell))
 
             for _ in range(bills):
-                if random.random() < 0.65 and popular_ids:
-                    prod_id = random.choice(popular_ids)
-                else:
-                    prod_id = random.choice(regular_ids)
-                    while prod_id in slow_ids and random.random() < 0.97:
-                        prod_id = random.choice(regular_ids)
+                ids, ws = day_weights(cur_date.date())
+                prod_id = random.choices(ids, weights=ws, k=1)[0]
                 p_info = next(p for p in products_inserted if p["id"] == prod_id)
                 c_type = random.choice(customer_types)
                 # Contractors buy higher volume (2 to 6 cans)

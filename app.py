@@ -58,6 +58,11 @@ def _overview():
     overview.render()
 
 
+def _forecast():
+    from src.ui.pages import sales_forecast
+    sales_forecast.render()
+
+
 def _colour_studio():
     from src.ui.pages import colour_studio
     colour_studio.render()
@@ -101,6 +106,7 @@ _log_versions()
 
 pages = {
     "overview": st.Page(_overview, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
+    "forecast": st.Page(_forecast, title="Sales Forecast", icon=":material/trending_up:", url_path="sales-forecast"),
     "colour": st.Page(_colour_studio, title="Colour Studio", icon=":material/format_paint:", url_path="colour-studio"),
     "stock": st.Page(_stock, title="Stock & Reorder", icon=":material/inventory_2:", url_path="stock"),
     "alerts": st.Page(_alerts, title="Alerts", icon=":material/notifications:", url_path="alerts"),

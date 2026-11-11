@@ -120,3 +120,41 @@ def cam_theft(source: str, day_str: str):
     from src import shop_insights as si
 
     return si.theft(source)
+
+
+# --- AI sales forecast (refit at most every 10 minutes) ------------------------------
+FC_TTL = 600
+
+
+@st.cache_data(ttl=FC_TTL, show_spinner="Fitting the sales forecast…")
+def forecast_outlook(day_str: str):
+    from src import sales_forecast as sf
+
+    return sf.outlook(30)
+
+
+@st.cache_data(ttl=FC_TTL, show_spinner=False)
+def forecast_backtest(day_str: str):
+    from src import sales_forecast as sf
+
+    return sf.backtest(28)
+
+
+@st.cache_data(ttl=FC_TTL, show_spinner=False)
+def forecast_rolling(day_str: str, horizon: int):
+    from src import sales_forecast as sf
+
+    return sf.rolling_backtest(horizon)
+
+
+@st.cache_data(ttl=FC_TTL, show_spinner=False)
+def forecast_product_history(day_str: str, product_id: int):
+    from src import sales_forecast as sf
+
+    return sf.product_history(product_id)
+
+
+@st.cache_data(ttl=FC_TTL, show_spinner=False)
+def forecast_product(day_str: str, product_id: int):
+    f = forecast_outlook(day_str)["model"].forecast(30)
+    return f[f["product_id"] == product_id].sort_values("day").reset_index(drop=True)
