@@ -16,7 +16,7 @@ import numpy as np
 
 from src import clock
 from src import database as db
-from src.config import DB_PATH, SAMPLE_ROOMS_DIR, SHADES_CATALOG_PATH
+from src.config import SAMPLE_DB_PATH as DB_PATH, SAMPLE_ROOMS_DIR, SHADES_CATALOG_PATH
 
 
 _DB_PATCH = None
@@ -28,15 +28,23 @@ def setUpModule():
     tmp = Path(tempfile.mkdtemp()) / "paint_shop.db"
     shutil.copy(DB_PATH, tmp)
     DB_PATH = tmp
-    _DB_PATCH = mock.patch.object(db, "DB_PATH", tmp)
-    _DB_PATCH.start()
+    import src.colour_assistant as ca
+    import src.config as cfg
+    import src.predictor as predictor
+    import src.sales_forecast as sf
+    import src.shop_insights as si
+    import src.smart_alerts as sa
+
+    _DB_PATCH = [mock.patch.object(m, "DB_PATH", tmp) for m in (db, cfg, ca, predictor, sf, si, sa)]
+    for p in _DB_PATCH:
+        p.start()
     db.ensure_app_tables()
     db.ensure_demo_dates_current()
 
 
 def tearDownModule():
-    if _DB_PATCH is not None:
-        _DB_PATCH.stop()
+    for p in _DB_PATCH or []:
+        p.stop()
 
 
 def _sample_room(name="master_bedroom.jpg"):
@@ -152,6 +160,31 @@ class TestLayer2KPIs(unittest.TestCase):
 
 
 # --------------------------------------------------------------------- Layer 3
+class TestLiveDatabase(unittest.TestCase):
+    """The app works on a live copy; a redeploy that replaces the sample database must not break or wipe it."""
+
+    def test_live_copy_is_created_and_survives_a_new_sample(self):
+        import src.config as cfg
+
+        d = Path(tempfile.mkdtemp())
+        sample, live = d / "paint_shop.db", d / "live" / "paint_shop.db"
+        shutil.copy(DB_PATH, sample)
+        with mock.patch.object(db, "SAMPLE_DB_PATH", sample), mock.patch.object(db, "DB_PATH", live), \
+                mock.patch.object(cfg, "DB_PATH", live):
+            self.assertTrue(db.ensure_live_db())                     # first start: copied from the sample
+            self.assertFalse(db.ensure_live_db())                    # next runs: nothing to do
+            db.log_footfall(2, 0)                                    # camera data in the live copy
+            with sqlite3.connect(live) as c:                          # a redeploy with a half-prepared database
+                c.execute("DROP TABLE alert_actions;")
+            self.assertTrue(db.ensure_live_db())                     # repaired, not crashed
+            self.assertEqual(db.get_hidden_alert_ids(), set())
+            self.assertEqual(db.get_door_counts_today()["in"], 2)   # camera data kept
+            with sqlite3.connect(sample) as c:                        # new sample data pushed (demo mode)
+                c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('seed_id', '\"new\"');")
+            with mock.patch.object(db, "DEMO_MODE", True):
+                self.assertTrue(db.ensure_live_db())                 # live copy refreshed to the new sample
+
+
 class TestLayer3Forecast(unittest.TestCase):
     def test_forecast_columns_and_order(self):
         from src.predictor import URGENCY_ORDER, compute_sales_forecast

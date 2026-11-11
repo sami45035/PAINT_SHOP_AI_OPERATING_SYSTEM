@@ -23,11 +23,15 @@ _PATCHES = []
 
 def setUpModule():
     tmp = Path(tempfile.mkdtemp()) / "paint_shop.db"
-    shutil.copy(cfg.DB_PATH, tmp)
+    shutil.copy(cfg.SAMPLE_DB_PATH, tmp)
     import src.predictor as predictor
     import src.sales_forecast as sf
 
-    for mod in (cfg, db, sf, predictor):
+    import src.colour_assistant as ca
+    import src.shop_insights as si
+    import src.smart_alerts as sa
+
+    for mod in (cfg, db, sf, predictor, ca, si, sa):
         p = mock.patch.object(mod, "DB_PATH", tmp)
         p.start()
         _PATCHES.append(p)

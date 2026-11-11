@@ -38,12 +38,15 @@ Python 3.10+.
 
 ```powershell
 pip install -r requirements.txt
-python data/seed_data.py          # sample data ending today
+python data/seed_data.py          # sample data ending today (data/paint_shop.db)
 python -m pytest -q               # or: python -m unittest discover tests
 streamlit run app.py
 ```
 
 Open `http://localhost:8501`.
+
+### Where the data lives
+`data/paint_shop.db` is the **sample** database (in git). The app works on a **live copy** in `data/live/` (not in git), made from the sample on first start — so updating the code (or a redeploy on Streamlit Cloud) never overwrites the database under a running app or wipes what a camera recorded. To start fresh, delete `data/live/`. In demo mode, a newly seeded sample replaces the live copy automatically. Set `PAINT_SHOP_DB` to use a different file.
 
 ### Demo mode
 The sample data is moved forward automatically so its last day is always "today" (expiry dates move with it). When the shop runs on real data, turn this off:

@@ -25,12 +25,15 @@ TMP_DB = None
 def setUpModule():
     global TMP_DB
     TMP_DB = Path(tempfile.mkdtemp()) / "paint_shop.db"
-    shutil.copy(cfg.DB_PATH, TMP_DB)
+    shutil.copy(cfg.SAMPLE_DB_PATH, TMP_DB)
     import src.predictor as predictor
     import src.shop_insights as si
     import src.smart_alerts as sa
 
-    for mod in (cfg, db, si, predictor, sa):
+    import src.colour_assistant as ca
+    import src.sales_forecast as sf
+
+    for mod in (cfg, db, si, predictor, sa, ca, sf):
         p = mock.patch.object(mod, "DB_PATH", TMP_DB)
         p.start()
         _PATCHES.append(p)

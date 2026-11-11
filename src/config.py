@@ -7,7 +7,10 @@ from pathlib import Path
 # Base Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "paint_shop.db"
+# The sample database lives in the repo; the app works on its own LIVE copy (not in git), so a
+# redeploy (git pull) can never overwrite the database under a running app or wipe camera data.
+SAMPLE_DB_PATH = DATA_DIR / "paint_shop.db"
+DB_PATH = Path(os.getenv("PAINT_SHOP_DB", str(DATA_DIR / "live" / "paint_shop.db")))
 SHADES_CATALOG_PATH = DATA_DIR / "shades_catalog.json"
 SAMPLE_ROOMS_DIR = DATA_DIR / "sample_rooms"
 MODELS_DIR = BASE_DIR / "models"

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from src import clock
-from src.config import DB_PATH, DEMO_MODE, EXPIRY_WARNING_DAYS
+from src.config import DB_PATH, DEMO_MODE, EXPIRY_WARNING_DAYS, SAMPLE_DB_PATH
 from src.formatting import ratio
 
 
@@ -35,6 +35,56 @@ VISITOR_ROWS = ("(footfall_logs.source = 'camera' OR (COALESCE(footfall_logs.sou
 def _upto() -> str:
     """Nothing after this moment counts (sample data has rows for later today)."""
     return clock.now_naive().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# --- Live database -------------------------------------------------------------
+
+def _seed_id(path) -> Optional[str]:
+    try:
+        with sqlite3.connect(path) as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key = 'seed_id';").fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _usable(path) -> bool:
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.execute("SELECT 1 FROM sales LIMIT 1;").fetchone()
+            conn.execute("SELECT 1 FROM alert_actions LIMIT 1;").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def ensure_live_db() -> bool:
+    """
+    Make sure the app's live database exists and is complete. It starts as a
+    copy of the sample database (data/paint_shop.db). In demo mode, when the
+    sample data in the repo changes (a new seed), the live copy is refreshed.
+    Returns True when the live database was (re)created.
+    """
+    import shutil
+
+    created = False
+    if not SAMPLE_DB_PATH.exists():
+        import subprocess
+        import sys as _sys
+
+        subprocess.run([_sys.executable, str(SAMPLE_DB_PATH.parent / "seed_data.py")], check=True)
+    if DB_PATH != SAMPLE_DB_PATH:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        stale = DB_PATH.exists() and DEMO_MODE and _seed_id(SAMPLE_DB_PATH) not in (None, _seed_id(DB_PATH))
+        if not DB_PATH.exists() or stale:
+            tmp = DB_PATH.with_suffix(".tmp")
+            shutil.copy(SAMPLE_DB_PATH, tmp)
+            tmp.replace(DB_PATH)                 # atomic: a running page never sees half a file
+            created = True
+    if created or not _usable(DB_PATH):
+        ensure_app_tables()
+        created = True
+    return created
 
 
 # --- Demo data upkeep ---------------------------------------------------------
@@ -550,7 +600,7 @@ def ensure_app_tables() -> None:
         if DEMO_MODE and not has_sample and conn.execute("SELECT 1 FROM sales LIMIT 1;").fetchone():
             import sys as _sys
 
-            _sys.path.insert(0, str(DB_PATH.parent))     # data/seed_camera.py
+            _sys.path.insert(0, str(SAMPLE_DB_PATH.parent))     # data/seed_camera.py
             try:
                 from seed_camera import seed_camera_history
             except ImportError:
@@ -584,8 +634,12 @@ def record_alert_action(alert_id: str, action: str, hide_days: int = 3) -> None:
 
 def get_hidden_alert_ids(on_day: Optional[date] = None) -> set:
     ds = _day(on_day).strftime("%Y-%m-%d")
-    with get_connection() as conn:
-        rows = conn.execute("SELECT alert_id FROM alert_actions WHERE hidden_until >= ?;", (ds,)).fetchall()
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("SELECT alert_id FROM alert_actions WHERE hidden_until >= ?;", (ds,)).fetchall()
+    except sqlite3.OperationalError:          # table missing (database just replaced): nothing hidden yet
+        ensure_app_tables()
+        return set()
     return {r[0] for r in rows}
 
 

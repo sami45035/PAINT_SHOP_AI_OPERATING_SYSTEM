@@ -9,7 +9,6 @@ Run:  streamlit run app.py
 """
 import faulthandler
 import os
-import subprocess
 import sys
 from html import escape
 
@@ -31,7 +30,7 @@ import streamlit as st  # noqa: E402
 st.set_page_config(page_title="Apex Paint AI", page_icon="🎨", layout="wide", initial_sidebar_state="expanded")
 
 from src import clock  # noqa: E402
-from src.config import DB_PATH, DEMO_MODE, ESP32_DEFAULT_STREAM_URL, STORE_SHORT_NAME  # noqa: E402
+from src.config import DEMO_MODE, ESP32_DEFAULT_STREAM_URL, STORE_SHORT_NAME  # noqa: E402
 from src.ui import data, nav  # noqa: E402
 from src.ui.theme import html, inject_css  # noqa: E402
 
@@ -90,15 +89,24 @@ def _aura():
 
 @st.cache_resource(show_spinner="Preparing shop data…")
 def _prepare_database(day: str) -> int:
-    """Create the sample database if missing; keep demo dates current (once per day)."""
+    """Keep demo dates current (once per day)."""
     from src import database as db
 
-    if not DB_PATH.exists():
-        subprocess.run([sys.executable, str(DB_PATH.parent / "seed_data.py")], check=True)
     db.ensure_app_tables()
     return db.ensure_demo_dates_current()
 
 
+def _live_db() -> None:
+    """Every run (cheap): the live database exists and is complete — even right after a redeploy."""
+    from src import database as db
+    from src.ui import data as ui_data
+
+    if db.ensure_live_db():
+        _prepare_database.clear()
+        ui_data.clear_all()
+
+
+_live_db()
 _prepare_database(clock.today_str())
 inject_css()
 

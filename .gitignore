@@ -18,6 +18,7 @@ ENV/
 # Downloaded wall model (fetched on first use) and camera alert photos
 models/
 data/security_snapshots/
+data/live/
 
 # IDEs & Editors
 .vscode/

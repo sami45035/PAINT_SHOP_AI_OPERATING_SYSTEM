@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "data"))
 
-from src.config import DB_PATH, SHADES_CATALOG_PATH
+from src.config import SAMPLE_DB_PATH as DB_PATH, SHADES_CATALOG_PATH
 from src.clock import today as store_today
 
 def init_db():
@@ -419,6 +419,15 @@ def populate_database(conn):
     # 7. Sample shop-camera history (visits, shelf picks, walk-outs) matching the sales above
     from seed_camera import seed_camera_history
     n_visits = seed_camera_history(conn)
+
+    # 8. Tables the app writes to, and a stamp so running apps know the sample data changed
+    from src.database import CAMERA_TABLES_SQL
+    conn.executescript(CAMERA_TABLES_SQL)
+    conn.execute("CREATE TABLE IF NOT EXISTS alert_actions (alert_id TEXT PRIMARY KEY, action TEXT NOT NULL, "
+                 "acted_at TEXT NOT NULL, hidden_until TEXT NOT NULL);")
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('seed_id', ?);",
+                 (datetime.now().strftime("%Y%m%d%H%M%S"),))
+    conn.commit()
 
     print(f"Successfully initialized and populated database at {DB_PATH}")
     print(f"Sample camera visits: {n_visits}")
