@@ -59,22 +59,30 @@
     octx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
     if (!stream) return;
     var r = videoRect();
-    octx.font = "600 12px Inter, sans-serif"; octx.lineWidth = 2;
-    // door line
-    var ly = r.y + args.line * r.h;
-    octx.strokeStyle = octx.fillStyle = "#F5C04A";
-    octx.beginPath(); octx.moveTo(r.x, ly); octx.lineTo(r.x + r.w, ly); octx.stroke();
-    octx.fillText("Door line", r.x + 8, ly - 6);
-    // staff-only zone
-    var z = args.zone;
-    octx.strokeStyle = octx.fillStyle = "#F97066";
-    octx.strokeRect(r.x + z[0] * r.w, r.y + z[1] * r.h, (z[2] - z[0]) * r.w, (z[3] - z[1]) * r.h);
-    octx.fillText("Staff only", r.x + z[0] * r.w + 6, r.y + z[1] * r.h + 16);
+    octx.font = "600 13px Inter, sans-serif"; octx.lineWidth = 2;
+    function tag(text, x, y, colour) {
+      var w = octx.measureText(text).width + 10;
+      octx.fillStyle = "rgba(21,26,32,0.85)"; octx.fillRect(x, y - 17, w, 20);
+      octx.fillStyle = colour; octx.fillText(text, x + 5, y - 2);
+    }
+    if (args.mode !== "presence") {
+      // door line
+      var ly = r.y + args.line * r.h;
+      octx.strokeStyle = "#F5C04A";
+      octx.beginPath(); octx.moveTo(r.x + (args.door_x1 || 0) * r.w, ly); octx.lineTo(r.x + (args.door_x2 == null ? 1 : args.door_x2) * r.w, ly); octx.stroke();
+      tag("Door line", r.x + 8, ly - 4, "#F5C04A");
+      // staff-only zone
+      var z = args.zone;
+      octx.strokeStyle = "#F97066";
+      octx.strokeRect(r.x + z[0] * r.w, r.y + z[1] * r.h, (z[2] - z[0]) * r.w, (z[3] - z[1]) * r.h);
+      tag("Staff only", r.x + z[0] * r.w + 4, r.y + z[1] * r.h + 20, "#F97066");
+    }
     // people
     (args.boxes || []).forEach(function (b) {
-      octx.strokeStyle = octx.fillStyle = b.zone ? "#F97066" : "#4ADE80";
+      var colour = b.zone ? "#F97066" : ((b.label || "").indexOf("Customer") === 0 ? "#4ADE80" : "#C9CED6");
+      octx.strokeStyle = colour;
       octx.strokeRect(r.x + b.x * r.w, r.y + b.y * r.h, b.w * r.w, b.h * r.h);
-      octx.fillText(b.kind === "face" ? "Person (close)" : "Person", r.x + b.x * r.w + 4, r.y + b.y * r.h - 5);
+      tag(b.label || "Person", r.x + b.x * r.w, r.y + b.y * r.h - 4, colour);
     });
   }
 
@@ -153,6 +161,8 @@
     if (a.boxes) args.boxes = a.boxes;
     if (typeof a.line === "number") args.line = a.line;
     if (a.zone) args.zone = a.zone;
+    if (a.mode) args.mode = a.mode;
+    if (typeof a.door_x1 === "number") { args.door_x1 = a.door_x1; args.door_x2 = a.door_x2; }
     if (a.interval) args.interval = a.interval;
     if (a.width) args.width = a.width;
     draw(); setHeight();

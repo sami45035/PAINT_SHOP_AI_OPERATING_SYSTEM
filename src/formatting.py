@@ -35,3 +35,17 @@ def pack(litres: float) -> str:
 
 def plural(n: int, word: str, many: str = "") -> str:
     return f"{n} {word if n == 1 else (many or word + 's')}"
+
+
+def ratio(num, den, min_den: float = 0.0, scale: float = 100.0, digits: int = 1):
+    """
+    num / den * scale per row, as plain floats (NaN where den <= min_den).
+
+    Columns read from SQLite can arrive as generic objects (or hold None) and
+    rounding those fails on newer pandas — so both sides are made numeric first.
+    """
+    import pandas as pd
+
+    n = pd.to_numeric(num, errors="coerce").astype("float64")
+    d = pd.to_numeric(den, errors="coerce").astype("float64")
+    return (n / d.where(d > min_den) * scale).round(digits)

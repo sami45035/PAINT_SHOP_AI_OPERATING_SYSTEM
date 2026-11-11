@@ -9,6 +9,7 @@ Theft & safety  walk-outs with unpaid cans, shelf vs till, after-hours, staff-on
 Set up          place the door line, counter, staff-only area and shelf slots; calibrate shelves
 """
 import copy
+import traceback
 from datetime import datetime
 from html import escape
 from typing import Optional
@@ -19,7 +20,7 @@ from PIL import Image
 
 from src import camera_charts as cc
 from src import clock, database as db
-from src.camera_stream import SOURCE_LABELS, StoreVisionEngine
+from src.camera_stream import COUNT_MODES, SOURCE_LABELS, StoreVisionEngine
 from src.config import ESP32_DEFAULT_STREAM_URL, STORE_CLOSE_HOUR, STORE_OPEN_HOUR
 from src.formatting import rupees
 from src.shop_vision import draw_layout, save_layout
@@ -78,12 +79,22 @@ def _fill_bar(cans: int, cap: int) -> str:
 def _right_now(eng: StoreVisionEngine, metrics: dict) -> None:
     counts = db.get_door_counts_today(source=eng.data_source)
     c1, c2, c3 = st.columns(3)
-    with c1:
-        kpi_card("Came in today", str(counts["in"]), "door line")
-    with c2:
-        kpi_card("In the shop", str(metrics.get("inside_now", counts["inside"])), "customers")
-    with c3:
-        kpi_card("At the counter", str(metrics.get("at_counter", 0)), "right now")
+    if eng.count_mode == "presence":
+        with c1:
+            kpi_card("Came in today", str(counts["in"]), "people seen")
+        with c2:
+            kpi_card("In view now", str(metrics.get("current_people", 0)), "at the counter")
+        with c3:
+            kpi_card("Left today", str(counts["out"]), "visits finished")
+        st.caption("Counting **people in view**: someone who stays in view for about 1.5 s counts as a visitor; "
+                   "out of view for about 4 s counts as left. Change it in **Set up**.")
+    else:
+        with c1:
+            kpi_card("Came in today", str(counts["in"]), "door line")
+        with c2:
+            kpi_card("In the shop", str(metrics.get("inside_now", counts["inside"])), "customers")
+        with c3:
+            kpi_card("At the counter", str(metrics.get("at_counter", 0)), "right now")
     shelves = metrics.get("shelves") or {}
     slots = eng.layout.get("shelves", [])
     if slots:
@@ -149,8 +160,10 @@ def _live_browser(eng: StoreVisionEngine) -> None:
     left, right = st.columns([3, 2], gap="large")
     with left:
         _alert_banner({"security_alert": SS.get("cam_last_alert")})
+        door = eng.layout.get("door", {})
         val = browser_cam(key="cam_browser_live", ack=SS.get("bc_ack", 0), boxes=SS.get("bc_boxes", []),
-                          line=eng.door_line_y, zone=eng.zone_box)
+                          line=eng.door_line_y, zone=eng.zone_box, mode=eng.count_mode,
+                          door_x=(door.get("x1", 0.0), door.get("x2", 1.0)))
         if val and val.get("seq") and val["seq"] != SS.get("bc_ack"):
             img = decode_image(val.get("frame", ""))
             if img is not None:
@@ -229,8 +242,14 @@ def _buyers_tab(src: str, day: str) -> None:
         kpi_card("Came in", str(f["came_in"]), sub)
     with c2:
         if b["real_till"]:
-            kpi_card("Bought", f"{b['bought_pct']:.0f}%" if b["bought_pct"] is not None else "—",
-                     f"{b['bills'] or 0} bills ÷ {b['visitors']} visitors")
+            pct = b["bought_pct"]
+            if pct is not None and pct > 100:
+                kpi_card("Bought", "—", f"{b['bills']} bills but only {b['visitors']} visitors counted — "
+                                        "the camera isn't seeing everyone yet")
+            else:
+                kpi_card("Bought", f"{pct:.0f}%" if pct is not None else "—",
+                         f"{b['bills'] or 0} bills ÷ {b['visitors']} visitors"
+                         + (f" since {b['since'][11:16]}" if src == "camera" else ""))
         else:
             kpi_card("Reached the counter", str(b["at_counter"]), "no till in the demo")
     with c3:
@@ -467,9 +486,25 @@ def _setup_tab(eng: StoreVisionEngine, source: str) -> None:
         if frame is not None:
             show_image(Image.fromarray(cv2.cvtColor(draw_layout(frame, eng.layout), cv2.COLOR_BGR2RGB)))
         return
+    with st.container(border=True):
+        _title("How should this camera count people?")
+        modes = list(COUNT_MODES)
+        mode = st.radio("Counting", modes, index=modes.index(eng.count_mode), format_func=COUNT_MODES.get,
+                        key="cam_count_mode", label_visibility="collapsed")
+        if mode != eng.count_mode:
+            lay = copy.deepcopy(eng.layout)
+            lay["count_mode"] = mode
+            save_layout(lay)
+            eng.set_layout(lay)
+            SS["cam_layout_edit"] = copy.deepcopy(lay)
+            st.toast("Counting mode saved.")
+            st.rerun()
+        st.caption("A laptop webcam or a camera above the billing counter sees people's faces and upper bodies — "
+                   "use **People in view**. A camera that sees the whole doorway from above — use **Door line**, "
+                   "which also tells coming in from going out and follows each customer to the counter.")
     frame = eng.latest_raw
     if frame is None:
-        st.info("Start the camera on the **Live** tab first — set-up needs a picture of the shop.")
+        st.info("Start the camera on the **Live** tab first — placing zones needs a picture of the shop.")
         return
     lay = SS.setdefault("cam_layout_edit", copy.deepcopy(eng.layout))
     pending = SS.setdefault("cam_clicks", [])
@@ -588,15 +623,27 @@ def render() -> None:
 
     tabs = st.tabs(["Live", "Visitors & buyers", "Shelves & fast movers", "Theft & safety", "Set up"])
     with tabs[0]:
-        _live_tab(eng, source)
+        _safely("Live view", _live_tab, eng, source)
     with tabs[1]:
         src = _data_source(source)
-        _buyers_tab(src, day)
+        _safely("Visitors & buyers", _buyers_tab, src, day)
     with tabs[2]:
         st.caption(f"Numbers from: **{DATA_SOURCES[src]}** (change on the Visitors & buyers tab)")
-        _shelves_tab(src, day)
+        _safely("Shelves & fast movers", _shelves_tab, src, day)
     with tabs[3]:
         st.caption(f"Numbers from: **{DATA_SOURCES[src]}** (change on the Visitors & buyers tab)")
-        _theft_tab(src, day)
+        _safely("Theft & safety", _theft_tab, src, day)
     with tabs[4]:
-        _setup_tab(eng, source)
+        _safely("Set up", _setup_tab, eng, source)
+
+
+def _safely(name: str, fn, *args) -> None:
+    """One tab failing must not take the others (or the live camera) down with it."""
+    try:
+        fn(*args)
+    except Exception as exc:  # noqa: BLE001
+        if "Rerun" in type(exc).__name__ or "Stop" in type(exc).__name__:
+            raise                       # st.rerun() / st.stop() are not errors
+        st.error(f"Something went wrong showing **{name}** ({type(exc).__name__}). The other tabs still work.")
+        with st.expander("Details for the developer"):
+            st.code(traceback.format_exc())

@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from src.formatting import ratio
 from src import clock
 from src.config import DB_PATH
 from src.predictor import event_applies
@@ -361,7 +362,7 @@ def outlook(days: int = 30, today: Optional[date] = None) -> Dict[str, Any]:
     per = pred.groupby("product_id")[["units", "revenue"]].sum()
     per = per.join(prods[["brand", "shade_name", "hex_code", "category", "pack_size_litres", "selling_price"]])
     per["last30"] = last30.reindex(per.index).fillna(0)
-    per["change_pct"] = ((per["units"] - per["last30"]) / per["last30"].where(per["last30"] >= 3) * 100).round(0)
+    per["change_pct"] = ratio(per["units"] - per["last30"], per["last30"], min_den=2.5, digits=0)
     per["label"] = per["shade_name"] + " " + per["pack_size_litres"].map(lambda x: f"{x:g} L")
     per = per.sort_values("revenue", ascending=False)
     daily = pred.groupby("day")[["units", "revenue"]].sum().reset_index()

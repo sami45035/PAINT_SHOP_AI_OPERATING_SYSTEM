@@ -12,6 +12,7 @@ import pandas as pd
 
 from src import clock
 from src.config import DB_PATH, DEMO_MODE, EXPIRY_WARNING_DAYS
+from src.formatting import ratio
 
 
 def get_connection():
@@ -284,7 +285,7 @@ def get_hourly_traffic(on_day: Optional[date] = None) -> pd.DataFrame:
     """
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(query, conn, params=(ds, _upto(), ds, _upto()))
-    df["conversion_pct"] = (df["bills"] / df["visitors"].where(df["visitors"] > 0) * 100).round(1).fillna(0.0)
+    df["conversion_pct"] = ratio(df["bills"], df["visitors"]).fillna(0.0)
     return df
 
 
@@ -312,7 +313,7 @@ def get_daily_traffic(days: int = 14, on_day: Optional[date] = None) -> pd.DataF
     """
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(query, conn, params=(start, end, _upto(), start, end, _upto()))
-    df["conversion_pct"] = (df["bills"] / df["visitors"].where(df["visitors"] > 0) * 100).round(1).fillna(0.0)
+    df["conversion_pct"] = ratio(df["bills"], df["visitors"]).fillna(0.0)
     return df
 
 
@@ -347,8 +348,8 @@ def get_footfall_pos_fusion(days: int = 14, on_day: Optional[date] = None) -> pd
     """
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(query, conn, params=(start, end))
-    df["conversion_rate_pct"] = (df["transactions"] / df["visitors"].where(df["visitors"] > 0) * 100).round(1).fillna(0.0)
-    df["atv"] = (df["revenue"] / df["transactions"].where(df["transactions"] > 0)).round(1).fillna(0.0)
+    df["conversion_rate_pct"] = ratio(df["transactions"], df["visitors"]).fillna(0.0)
+    df["atv"] = ratio(df["revenue"], df["transactions"], scale=1.0).fillna(0.0)
     return df
 
 

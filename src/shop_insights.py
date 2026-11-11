@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from src.formatting import ratio
 from src import clock
 from src.config import DB_PATH
 
@@ -89,16 +90,38 @@ def footfall(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     }
 
 
+def camera_since(source: str, ds: str) -> str:
+    """
+    When this source started watching on day `ds`. A real camera switched on at
+    3 PM must only be compared with bills from 3 PM on (sample history covers the whole day).
+    """
+    if source != "camera":
+        return ds + " 00:00:00"
+    # visits carry the exact time; door counts are stored per hour, so they're the fallback
+    for sql in ("SELECT MIN(entered_at) AS t FROM visits WHERE source = ? AND DATE(entered_at) = ?;",
+                "SELECT MIN(timestamp) AS t FROM footfall_logs WHERE source = ? AND DATE(timestamp) = ?;"):
+        row = _q(sql, (source, ds))
+        t = row["t"].iloc[0] if not row.empty else None
+        if isinstance(t, str):
+            return t
+    return ds + " 00:00:00"
+
+
 def daily_footfall(source: str, days: int = 14, day: Optional[date] = None) -> pd.DataFrame:
     end = datetime.strptime(_ds(day), "%Y-%m-%d").date()
     start = (end - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     now = _now()
     v = _q("SELECT DATE(timestamp) AS day, SUM(count_in) AS visitors FROM footfall_logs WHERE source = ? "
            "AND DATE(timestamp) BETWEEN ? AND ? AND timestamp <= ? GROUP BY day;", (source, start, end.isoformat(), now))
-    b = _q("SELECT DATE(sale_timestamp) AS day, COUNT(DISTINCT invoice_no) AS bills FROM sales "
-           "WHERE DATE(sale_timestamp) BETWEEN ? AND ? AND sale_timestamp <= ? GROUP BY day;", (start, end.isoformat(), now))
+    rows = []
+    for d in v["day"]:
+        since = camera_since(source, d)
+        n = _q("SELECT COUNT(DISTINCT invoice_no) AS bills FROM sales WHERE sale_timestamp >= ? AND DATE(sale_timestamp) = ? "
+               "AND sale_timestamp <= ?;", (since, d, now))
+        rows.append({"day": d, "bills": int(n["bills"].iloc[0] or 0)})
+    b = pd.DataFrame(rows, columns=["day", "bills"])
     out = v.merge(b, on="day", how="left").fillna({"bills": 0})
-    out["bought_pct"] = (out["bills"] / out["visitors"].where(out["visitors"] > 0) * 100).round(1)
+    out["bought_pct"] = ratio(out["bills"], out["visitors"], digits=1)
     return out
 
 
@@ -114,8 +137,10 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     foot = footfall(source, day)
     v = _q("SELECT CAST(strftime('%H', entered_at) AS INTEGER) AS hour, reached_counter, shelves, picked, put_back, "
            "outcome FROM visits WHERE source = ? AND DATE(entered_at) = ? AND left_at <= ?;", (source, ds, now))
+    since = camera_since(source, ds)
     sales = _q("SELECT invoice_no, CAST(strftime('%H', MIN(sale_timestamp)) AS INTEGER) AS hour, SUM(total_amount) AS amount "
-               "FROM sales WHERE DATE(sale_timestamp) = ? AND sale_timestamp <= ? GROUP BY invoice_no;", (ds, now))
+               "FROM sales WHERE DATE(sale_timestamp) = ? AND sale_timestamp >= ? AND sale_timestamp <= ? GROUP BY invoice_no;",
+               (ds, since, now))
     real_till = source != "demo"
     visitors = foot["came_in"]
     finished = len(v)
@@ -137,7 +162,7 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
         if c not in hourly:
             hourly[c] = 0
     hourly = hourly.fillna(0).sort_values("hour").reset_index(drop=True)
-    hourly["bought_pct"] = (hourly["bills"] / hourly["visitors"].where(hourly["visitors"] > 0) * 100).round(0)
+    hourly["bought_pct"] = ratio(hourly["bills"], hourly["visitors"], digits=0)
 
     rate = (bills / visitors) if (real_till and visitors) else None
     # Hours where many came in but few bought (half the day's rate or worse)
@@ -155,7 +180,7 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
         "left_without_counter": left_without_counter, "walkouts": walkouts, "avg_bill": avg_bill,
         "weak_hours": weak, "missed_bills": missed,
         "missed_value": round(missed * avg_bill) if (missed and avg_bill) else 0,
-        "hourly": hourly, "real_till": real_till,
+        "hourly": hourly, "real_till": real_till, "since": since,
     }
 
 
@@ -260,8 +285,8 @@ def fast_movers(source: str, days: int = 7, limit: int = 8, day: Optional[date] 
               "FROM sales s JOIN products p ON p.id = s.product_id WHERE s.sale_timestamp > ? AND s.sale_timestamp <= ? "
               "GROUP BY p.id ORDER BY units DESC;", (start, start, start, prev, end_s))
     till["label"] = till.apply(product_label, axis=1)
-    till["per_day"] = (till["units"] / days).round(1)
-    till["trend_pct"] = ((till["units"] - till["units_prev"]) / till["units_prev"].where(till["units_prev"] >= 3) * 100).round(0)
+    till["per_day"] = (pd.to_numeric(till["units"], errors="coerce").astype("float64") / days).round(1)
+    till["trend_pct"] = ratio(pd.to_numeric(till["units"], errors="coerce") - pd.to_numeric(till["units_prev"], errors="coerce"), till["units_prev"], min_den=2.5, digits=0)
     cam = interest(source, days, day)
     top = till.head(limit).copy()
     if not cam.empty:

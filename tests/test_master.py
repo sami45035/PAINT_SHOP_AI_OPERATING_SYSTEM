@@ -227,6 +227,7 @@ class TestLayer5Camera(unittest.TestCase):
         from src.camera_stream import StoreVisionEngine
 
         eng = StoreVisionEngine("webcam", log_to_db=False)
+        eng.layout["count_mode"] = "door"
         h, line = 480, int(0.68 * 480)
         t = 0.0
         # Someone hovering right on the door line for 40 frames: no counts
@@ -237,6 +238,7 @@ class TestLayer5Camera(unittest.TestCase):
             t += 0.12
         # One clean walk in, then out: exactly one each way
         eng2 = StoreVisionEngine("webcam", log_to_db=False)
+        eng2.layout["count_mode"] = "door"
         totals = [0, 0]
         for y_feet in list(range(line - 120, line + 120, 15)) + list(range(line + 120, line - 120, -15)):
             e, x = eng2._update_tracks([(300, int(y_feet - 0.9 * 150), 60, 150)], line, t, h)
@@ -249,6 +251,7 @@ class TestLayer5Camera(unittest.TestCase):
         from src.camera_stream import StoreVisionEngine
 
         eng = StoreVisionEngine("webcam", log_to_db=False)
+        eng.layout["count_mode"] = "door"
         h, line = 480, int(0.68 * 480)
         total = 0
         for i, top in enumerate(range(0, 300, 10)):        # someone close to the camera, feet out of view

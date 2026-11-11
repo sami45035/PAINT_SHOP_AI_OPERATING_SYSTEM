@@ -182,6 +182,7 @@ class TestDoorLine(unittest.TestCase):
         from src.camera_stream import StoreVisionEngine
 
         eng = StoreVisionEngine("webcam", log_to_db=False)
+        eng.layout["count_mode"] = "door"
         eng.layout["door"] = {"y": 0.5, "x1": 0.4, "x2": 0.6}
         eng._frame_w, h, line = 960, 540, 270
         total = [0, 0]
@@ -191,6 +192,7 @@ class TestDoorLine(unittest.TestCase):
             total[1] += x
         self.assertEqual(total, [0, 0])
         eng2 = StoreVisionEngine("webcam", log_to_db=False)
+        eng2.layout["count_mode"] = "door"
         eng2.layout["door"] = {"y": 0.5, "x1": 0.4, "x2": 0.6}
         eng2._frame_w = 960
         for i, yf in enumerate(range(200, 400, 12)):                                     # through the doorway, then aside
@@ -198,6 +200,74 @@ class TestDoorLine(unittest.TestCase):
             e, _ = eng2._update_tracks([(x, int(yf - 0.9 * 150), 50, 150)], line, i * 0.2, h)
             total[0] += e
         self.assertEqual(total[0], 1)
+
+
+# ----------------------------------------------------------------------------- footfall: people in view (webcam)
+class TestPeopleInView(unittest.TestCase):
+    """A webcam at the counter: each person who stays in view is a visit; a missed frame isn't a new visitor."""
+
+    def test_counts_visits_not_frames(self):
+        import src.camera_stream as cs
+
+        face = (200, 80, 90, 90)
+        frame = np.full((360, 480, 3), 120, np.uint8)
+        t = [5000.0]
+        seen = [True] * 20 + [False] * 12 + [True] * 10 + [False] * 12
+        seen[5] = seen[6] = seen[13] = False                    # face missed now and then (head turned)
+        with mock.patch.object(cs.time, "time", side_effect=lambda: t[0]), \
+                mock.patch.object(cs.StoreVisionEngine, "detect_people", lambda self, f: []), \
+                mock.patch.object(cs.StoreVisionEngine, "detect_faces", lambda self, f, b: [face] if f[0, 0, 0] == 120 else []), \
+                mock.patch.object(cs, "log_footfall") as lf, mock.patch.object(cs, "log_visit") as lv:
+            eng = cs.StoreVisionEngine("webcam")
+            self.assertEqual(eng.count_mode, "presence")
+            for i, s in enumerate(seen):
+                f = frame if s else np.full_like(frame, 200)
+                _, m = eng.process_frame(f)
+                if i == 1:
+                    self.assertEqual(m["entered"], 0)            # not yet: someone just passing by
+                t[0] += 0.5
+        self.assertEqual((m["entered"], m["exited"]), (2, 2))
+        self.assertEqual(sum(c.kwargs.get("count_in", 0) for c in lf.call_args_list), 2)
+        self.assertTrue(all(c.kwargs.get("source") == "camera" for c in lf.call_args_list))
+        stays = [(c.args[2] - c.args[1]).total_seconds() for c in lv.call_args_list]
+        self.assertEqual(len(stays), 2)
+        self.assertAlmostEqual(stays[0], 9.5, delta=1.0)        # in view about 10 s
+        self.assertAlmostEqual(stays[1], 4.5, delta=1.0)
+
+    def test_camera_bills_only_since_it_started(self):
+        from src import shop_insights as si
+
+        with Frozen(19):
+            with sqlite3.connect(TMP_DB) as c:
+                c.execute("DELETE FROM visits WHERE source='camera';")
+                c.execute("DELETE FROM footfall_logs WHERE source='camera';")
+            db.log_visit("camera", clock.now_naive() - timedelta(minutes=30), clock.now_naive() - timedelta(minutes=25),
+                         True, [], 0, 0, "reached_counter")
+            db.log_footfall(1, 1, at=clock.now_naive() - timedelta(minutes=30))
+            b = si.buyers("camera")
+            with sqlite3.connect(TMP_DB) as c:
+                n = c.execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? AND sale_timestamp <= ?",
+                              (b["since"], clock.now_naive().strftime("%Y-%m-%d %H:%M:%S"))).fetchone()[0]
+            self.assertEqual(b["bills"], n)
+            self.assertEqual(b["since"][11:16], (clock.now_naive() - timedelta(minutes=30)).strftime("%H:%M"))
+            si.daily_footfall("camera")                         # used to crash on Streamlit Cloud's pandas
+            with sqlite3.connect(TMP_DB) as c:
+                c.execute("DELETE FROM visits WHERE source='camera';")
+                c.execute("DELETE FROM footfall_logs WHERE source='camera';")
+
+
+class TestRatio(unittest.TestCase):
+    def test_ratio_survives_object_columns_and_blanks(self):
+        import pandas as pd
+
+        from src.formatting import ratio
+
+        num = pd.Series([1, None, 3, 4], dtype=object)
+        den = pd.Series([2, 5, 0, None], dtype=object)
+        out = ratio(num, den)
+        self.assertEqual(out.iloc[0], 50.0)
+        self.assertTrue(out.iloc[1:].isna().all())
+        self.assertTrue(ratio(pd.Series([], dtype=object), pd.Series([], dtype=object)).empty)
 
 
 # ----------------------------------------------------------------------------- insights on the sample history

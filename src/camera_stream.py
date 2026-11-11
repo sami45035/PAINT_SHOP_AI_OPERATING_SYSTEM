@@ -29,7 +29,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,7 +65,13 @@ from src.shop_vision import (
 SNAPSHOT_DIR = DATA_DIR / "security_snapshots"
 SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}
 BLUE = (235, 140, 60)
-LOST_JOURNEY_S = 600.0
+LOST_JOURNEY_S = 600.0     # a customer the camera lost and never saw leaving is closed after 10 minutes
+PRESENCE_CONFIRM_S = 1.5   # "people in view" mode: in view this long = a visitor (not someone walking past)
+PRESENCE_GONE_S = 4.0      # ... and out of view this long = left
+COUNT_MODES = {
+    "presence": "People in view — camera at the counter or desk (counts each person it sees)",
+    "door": "Door line — camera sees the whole doorway (counts feet crossing the line)",
+}
 
 
 def _tag(frame: np.ndarray, text: str, x: int, y: int, colour) -> None:
@@ -107,6 +113,7 @@ class Track:
     counted_out: bool = False
     history: List[float] = field(default_factory=list)
     out_x: Optional[float] = None     # where the feet were when last seen beyond the door line
+    first_seen: float = 0.0
 
 
 class StoreVisionEngine:
@@ -155,15 +162,15 @@ class StoreVisionEngine:
         self.frames_seen = 0
 
         # Faces: so someone close to the camera (at the counter) is still seen
-        self.face = None
+        self.face = self.face_side = None
         try:
-            path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-            if path.exists():
-                self.face = cv2.CascadeClassifier(str(path))
-                if self.face.empty():
-                    self.face = None
+            base = Path(cv2.data.haarcascades)
+            for attr, name in (("face", "haarcascade_frontalface_default.xml"), ("face_side", "haarcascade_profileface.xml")):
+                if (base / name).exists():
+                    c = cv2.CascadeClassifier(str(base / name))
+                    setattr(self, attr, None if c.empty() else c)
         except Exception:
-            self.face = None
+            self.face = self.face_side = None
 
         # Background reading: the camera is read continuously so people walking
         # through the door aren't missed between screen refreshes.
@@ -200,6 +207,10 @@ class StoreVisionEngine:
     @zone_box.setter
     def zone_box(self, v) -> None:
         self.layout["staff_zone"] = [float(x) for x in v]
+
+    @property
+    def count_mode(self) -> str:
+        return self.layout.get("count_mode") or ("presence" if self.source_type == "webcam" else "door")
 
     def set_layout(self, layout: Dict[str, Any]) -> None:
         self.layout = layout
@@ -334,9 +345,20 @@ class StoreVisionEngine:
         gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         h, w = gray.shape
         min_side = max(40, w // 16)
-        faces = self.face.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=6, minSize=(min_side, min_side))
+        found = list(self.face.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=6, minSize=(min_side, min_side)))
+        if self.face_side is not None:          # a head turned to the side (both directions)
+            found += list(self.face_side.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=6, minSize=(min_side, min_side)))
+            flipped = self.face_side.detectMultiScale(cv2.flip(gray, 1), scaleFactor=1.15, minNeighbors=6,
+                                                      minSize=(min_side, min_side))
+            found += [(w - x - fw, y, fw, fh) for (x, y, fw, fh) in flipped]
+        faces = []
+        for f in sorted(found, key=lambda b: -b[2] * b[3]):      # keep one box per face
+            fx, fy, fw_, fh_ = f
+            if not any(abs((fx + fw_ / 2) - (gx + gw / 2)) < gw / 2 and abs((fy + fh_ / 2) - (gy + gh / 2)) < gh / 2
+                       for gx, gy, gw, gh in faces):
+                faces.append(tuple(int(v) for v in f))
         out = []
-        for (x, y, fw, fh) in (faces if len(faces) else []):
+        for (x, y, fw, fh) in faces:
             cx, cy = x + fw / 2, y + fh / 2
             if any(bx <= cx <= bx + bw and by <= cy <= by + bh for bx, by, bw, bh in bodies):
                 continue
@@ -368,7 +390,7 @@ class StoreVisionEngine:
                 if d < best_d:
                     best, best_d = tid, d
             if best is None:
-                tr = Track(self.next_track_id, c, (x, y, bw, bh), now_s, history=[c[1]])
+                tr = Track(self.next_track_id, c, (x, y, bw, bh), now_s, history=[c[1]], first_seen=now_s)
                 self.tracks[tr.id] = tr
                 self.next_track_id += 1
             else:
@@ -378,6 +400,13 @@ class StoreVisionEngine:
                 tr.frames += 1
                 tr.history = (tr.history + [c[1]])[-20:]
             self._det_tracks.append(tr.id)
+            if self.count_mode == "presence":
+                # a person who stays in view a moment is a visitor; feet and door line don't matter
+                if (not tr.counted_in or tr.counted_out) and tr.frames >= 2 and now_s - tr.first_seen >= PRESENCE_CONFIRM_S:
+                    entered += 1
+                    tr.counted_in, tr.counted_out = True, False
+                    self._crossed.append((tr, "in"))
+                continue
             if not feet_visible:
                 continue
             side = "out" if c[1] < line_y - margin else ("in" if c[1] > line_y + margin else None)
@@ -399,11 +428,19 @@ class StoreVisionEngine:
                 tr.counted_out = True
                 self._crossed.append((tr, "out"))
             tr.side = side
-        stale = 4.0 if self.source_type == "demo" else 1.5
+        presence = self.count_mode == "presence"
+        stale = PRESENCE_GONE_S if presence else (4.0 if self.source_type == "demo" else 1.5)
         for tid in [t for t, tr in self.tracks.items() if now_s - tr.last_seen > stale]:
-            j = self.journeys.pop(tid, None)
-            if j is not None:
-                self.lost.append((j, now_s))               # may be the same person seen again at the door
+            tr = self.tracks[tid]
+            if presence:
+                if tr.counted_in and not tr.counted_out:      # out of view long enough: they left
+                    exited += 1
+                    tr.counted_out = True
+                    self._crossed.append((tr, "out"))
+            else:
+                j = self.journeys.pop(tid, None)
+                if j is not None:
+                    self.lost.append((j, now_s))           # may be the same person seen again at the door
             del self.tracks[tid]
         return entered, exited
 
@@ -411,11 +448,17 @@ class StoreVisionEngine:
     def _finish_visit(self, j: Journey, now: datetime, frame: Optional[np.ndarray], seen_leaving: bool = True) -> None:
         outcome = j.outcome() if seen_leaving else ("reached_counter" if j.reached_counter else "browsed")
         picked = j.net_picked
+        # how long they stayed, by the camera's own clock (the same clock that tracks them)
+        stay = max(0.0, time.time() - j.entered_t) if j.entered_t else 0.0
+        if self.count_mode == "presence" and seen_leaving:
+            stay = max(0.0, stay - PRESENCE_GONE_S)    # they left when last seen, not when we gave up waiting
+        entered = j.entered_at or now.replace(tzinfo=None)
         if self.log_to_db:
-            log_visit(self.data_source, j.entered_at or now.replace(tzinfo=None), now.replace(tzinfo=None),
+            log_visit(self.data_source, entered, entered + timedelta(seconds=stay),
                       j.reached_counter, j.shelves, picked, j.put_back, outcome)
         words = {"reached_counter": "went to the counter", "browsed": "looked around", "unpaid_exit": "left with a can"}
-        self._event("visit", f"Customer left — {words.get(outcome, outcome)}"
+        stay_txt = f"{stay / 60:.0f} min" if stay >= 90 else f"{stay:.0f} s"
+        self._event("visit", f"Customer left after {stay_txt} — {words.get(outcome, outcome)}"
                     + (f", took {picked} can{'s' if picked != 1 else ''}" if picked else "")
                     + (f", put back {j.put_back}" if j.put_back else ""))
         if outcome == "unpaid_exit" and frame is not None:
@@ -436,7 +479,9 @@ class StoreVisionEngine:
         h, w = frame.shape[:2]
         for tr, direction in self._crossed:
             if direction == "in":
-                self.journeys[tr.id] = Journey(entered_at=now.replace(tzinfo=None), entered_t=now_s)
+                since = tr.first_seen if self.count_mode == "presence" else now_s   # presence: they arrived when first seen
+                self.journeys[tr.id] = Journey(entered_at=now.replace(tzinfo=None) - timedelta(seconds=now_s - since),
+                                               entered_t=since)
                 self._event("door", "Customer came in")
             else:
                 j = self.journeys.pop(tr.id, None) or self._adopt_lost(now_s)
@@ -457,20 +502,23 @@ class StoreVisionEngine:
         staff = to_px(self.layout["staff_zone"], w, h)
         slots = [(s, to_px(s["box"], w, h)) for s in self.layout.get("shelves", [])]
         at_counter, in_staff = 0, []
+        presence = self.count_mode == "presence"
         for box, tid in zip(people, self._det_tracks):
             ft = feet(box)
             j = self.journeys.get(tid)
             tr = self.tracks.get(tid)
-            if inside(ft, counter):
+            at_ctr = presence or inside(ft, counter)        # a counter camera: everyone it sees is at the counter
+            if at_ctr:
                 at_counter += 1
-            if inside(ft, staff) and (j is not None or after_hours):
+            centre = (box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
+            if (inside(centre, staff) if presence else inside(ft, staff)) and (after_hours or (j is not None and not presence)):
                 in_staff.append(box)
             if j is None:
                 continue
             dt = min(1.0, max(0.0, now_s - getattr(tr, "_jt", now_s))) if tr is not None else 0.0
             if tr is not None:
                 tr._jt = now_s
-            if inside(ft, counter):
+            if at_ctr:
                 j.counter_s += dt
                 if not j.reached_counter and j.counter_s >= COUNTER_SECONDS:
                     j.reached_counter = True
@@ -575,9 +623,12 @@ class StoreVisionEngine:
         line_y = int(self.door_line_y * h)
         after_hours = not clock.is_store_open(now)
         now_s = time.time()
+        presence = self.count_mode == "presence"
 
         people = self.detect_people(frame)
         faces = self.detect_faces(frame, people)
+        if self.count_mode == "presence":
+            people, faces = people + faces, []      # a face is a person too (webcams rarely see whole bodies)
         entered, exited = self._update_tracks(people, line_y, now_s, h)
         if entered or exited:
             self.total_entered += entered
@@ -609,12 +660,13 @@ class StoreVisionEngine:
         cx1, cy1, cx2, cy2 = to_px(self.layout["counter"], w, h)
         door = self.layout["door"]
         dx1, dx2 = int(door.get("x1", 0.0) * w), int(door.get("x2", 1.0) * w)
-        cv2.line(frame, (dx1, line_y), (dx2, line_y), YELLOW, 2)
-        _tag(frame, "Door line", dx1 + 4, line_y - 6, YELLOW)
-        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), BLUE, 2)
-        _tag(frame, "Billing counter", cx1 + 2, cy1 + 18, BLUE)
-        cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), RED, 2)
-        _tag(frame, "Staff only", zx1 + 2, zy1 + 18, RED)
+        if not presence:            # a counter camera has no door line, counter box or staff area to show
+            cv2.line(frame, (dx1, line_y), (dx2, line_y), YELLOW, 2)
+            _tag(frame, "Door line", dx1 + 4, line_y - 6, YELLOW)
+            cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), BLUE, 2)
+            _tag(frame, "Billing counter", cx1 + 2, cy1 + 18, BLUE)
+            cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), RED, 2)
+            _tag(frame, "Staff only", zx1 + 2, zy1 + 18, RED)
         counts = self.shelves.counts()
         for s_ in self.shelves.slots:
             sx1, sy1, sx2, sy2 = to_px(s_["box"], w, h)
@@ -626,12 +678,17 @@ class StoreVisionEngine:
             cv2.rectangle(frame, (sx1, sy2 - 16), (sx1 + 8 * len(tag), sy2), DARK, -1)
             cv2.putText(frame, tag, (sx1 + 3, sy2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
 
+        box_tags = []
         for (x, y, bw, bh), tid in zip(people, self._det_tracks):
             j = self.journeys.get(tid)
+            tr = self.tracks.get(tid)
             if j is None:
-                colour, tag = (190, 190, 190), "Person"
+                colour, tag = (190, 190, 190), ("Person · checking…" if presence else "Person")
             elif j.net_picked and not j.reached_counter:
                 colour, tag = RED, f"Customer · {j.net_picked} can{'s' if j.net_picked != 1 else ''}"
+            elif presence:
+                secs = now_s - (tr.first_seen if tr else now_s)
+                colour, tag = GREEN, f"Customer · {secs / 60:.0f} min" if secs >= 90 else f"Customer · {secs:.0f} s"
             elif j.reached_counter:
                 colour, tag = BLUE, "Customer · at counter"
             else:
@@ -640,6 +697,7 @@ class StoreVisionEngine:
                 colour = RED
             cv2.rectangle(frame, (x, y), (x + bw, y + bh), colour, 2)
             _tag(frame, tag, x, y - 4, colour)
+            box_tags.append(tag)
 
         for (x, y, fw, fh) in faces:
             cv2.rectangle(frame, (x, y), (x + fw, y + fh), GREEN, 2)
@@ -657,6 +715,7 @@ class StoreVisionEngine:
             "exited": self.total_exited,
             "occupancy": self.current_occupancy,
             "inside_now": len(self.journeys),
+            "count_mode": self.count_mode,
             "at_counter": at_counter,
             "shelves": counts,
             "events": list(self.events[:12]),
@@ -664,9 +723,9 @@ class StoreVisionEngine:
             "security_alert": alert,
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
             # Boxes as fractions of the frame, for drawing over a live browser video
-            "boxes": [{"x": x / w, "y": y / h, "w": bw / w, "h": bh / h,
-                       "zone": bool(zx1 <= x + bw // 2 <= zx2 and zy1 <= y + bh * 0.97 <= zy2), "kind": "person"}
-                      for (x, y, bw, bh) in people]
+            "boxes": [{"x": x / w, "y": y / h, "w": bw / w, "h": bh / h, "label": t,
+                       "zone": any(b == (x, y, bw, bh) for b in in_staff), "kind": "person"}
+                      for (x, y, bw, bh), t in zip(people, box_tags)]
                      + [{"x": x / w, "y": y / h, "w": fw / w, "h": fh / h, "zone": False, "kind": "face"}
                         for (x, y, fw, fh) in faces],
         }
