@@ -78,6 +78,7 @@ On first use, Colour Studio downloads the wall-finding model once (SegFormer-B3 
 - **Use a model file you already have:** `set WALL_MODEL_PATH=C:\path\to\model.onnx` (put its `config.json` next to it)
 - **No internet / download failed:** Colour Studio switches to **tap mode** — tap each wall on the photo and it grows the wall from that point, stopping at corners and edges.
 - **Faster wall finding:** `set WALL_MODEL_FLIP_PASS=0` skips the second (mirrored) model pass — about half the time, slightly rougher edges.
+- **Memory:** the model runs without ONNX Runtime's memory pool, on 2 threads, and frees memory after each photo. On Streamlit Cloud (about 1 GB per app) it sees photos at 448 px on the short side (768 max) instead of 512/896. Override with `WALL_MODEL_INPUT_SIZE`, `WALL_MODEL_MAX_LONG_SIDE`, `WALL_MODEL_THREADS`. The server log shows `[apex] memory …` lines around each run. If an app host has very little memory, `WALL_MODEL_REPO=Xenova/segformer-b0-finetuned-ade-512-512` uses a much lighter model.
 
 ### How walls are found (`src/colour_studio/refine.py`)
 The model predicts on a coarse grid, so its raw wall map has holes at lamp glow, leaks onto headboards and sofas, and ragged edges. The clean-up uses the photo itself:

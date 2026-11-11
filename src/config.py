@@ -52,8 +52,12 @@ SECURITY_ALERT_COOLDOWN_SECONDS = 60  # At most one saved alert per type per min
 WALL_MODEL_REPO = os.getenv("WALL_MODEL_REPO", "Xenova/segformer-b3-finetuned-ade-512-512")
 WALL_MODEL_FILES = ["onnx/model_quantized.onnx", "onnx/model.onnx"]   # tried in this order
 WALL_MODEL_PATH = os.getenv("WALL_MODEL_PATH", "")  # set to use a local .onnx instead of downloading
-WALL_MODEL_INPUT_SIZE = 512        # short side of the photo as the model sees it (shape is kept)
-WALL_MODEL_MAX_LONG_SIDE = 896
+# Streamlit Community Cloud gives an app about 1 GB of memory (and a couple of CPU cores) — the
+# wall model runs a little smaller there. On a laptop it uses the full size.
+ON_STREAMLIT_CLOUD = Path("/mount/src").exists() or os.getenv("PAINT_SHOP_CLOUD") == "1"
+WALL_MODEL_INPUT_SIZE = int(os.getenv("WALL_MODEL_INPUT_SIZE", "448" if ON_STREAMLIT_CLOUD else "512"))  # short side the model sees
+WALL_MODEL_MAX_LONG_SIDE = int(os.getenv("WALL_MODEL_MAX_LONG_SIDE", "768" if ON_STREAMLIT_CLOUD else "896"))
+WALL_MODEL_THREADS = int(os.getenv("WALL_MODEL_THREADS", "2"))
 WALL_MODEL_FLIP_PASS = os.getenv("WALL_MODEL_FLIP_PASS", "1") not in ("0", "false", "False")  # 2nd mirrored pass: steadier edges, ~2x time
 COLOUR_WORKING_MAX_SIDE = 960       # photos are resized to this for speed
 

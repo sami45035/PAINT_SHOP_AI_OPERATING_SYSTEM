@@ -94,7 +94,7 @@ def _reset_for(img_id: str) -> None:
         SS["cs_taps"] = []
         SS["cs_sel"] = None          # None = pick a sensible default
         SS["cs_last_click"] = None
-        SS["cs_cache"] = {}          # everything computed for this photo (see _memo)
+        SS["cs_cache"], SS["cs_cache_sizes"] = {}, {}   # everything computed for this photo (see _memo)
         SS["cs_edits_url"] = ""      # brush touch-ups (PNG: red = painted, green = erased)
         SS["cs_edits"] = None
         SS["cs_edits_ts"] = 0
@@ -103,16 +103,37 @@ def _reset_for(img_id: str) -> None:
         SS["cs_look"], SS["cs_look_plan"], SS["cs_look_paints"] = None, None, None
 
 
-def _memo(key, fn, keep: int = 24):
-    """Small per-photo cache, so a click never recomputes what it didn't change."""
+CACHE_MB = 120          # per visitor: enough for every look, brush and preview of one photo
+
+
+def _size(v) -> int:
+    if isinstance(v, np.ndarray):
+        return v.nbytes
+    if isinstance(v, (bytes, str)):
+        return len(v)
+    if isinstance(v, (list, tuple)):
+        return sum(_size(x) for x in v)
+    if isinstance(v, dict):
+        return sum(_size(x) for x in v.values())
+    if isinstance(v, Image.Image):
+        return v.width * v.height * len(v.getbands())
+    return 1024
+
+
+def _memo(key, fn, keep: int = 60):
+    """Small per-photo cache, so a click never recomputes what it didn't change (kept under CACHE_MB)."""
     cache: Dict = SS.setdefault("cs_cache", {})
+    sizes: Dict = SS.setdefault("cs_cache_sizes", {})
     if key in cache:
         cache[key] = cache.pop(key)      # mark as recently used
         return cache[key]
     val = fn()
     cache[key] = val
-    while len(cache) > keep:
-        cache.pop(next(iter(cache)))
+    sizes[key] = _size(val)
+    while len(cache) > 1 and (len(cache) > keep or sum(sizes.get(k, 0) for k in cache) > CACHE_MB * 2**20):
+        old = next(iter(cache))           # least recently used
+        cache.pop(old)
+        sizes.pop(old, None)
     return val
 
 
@@ -450,7 +471,7 @@ def _thumb(result: seg.SegmentationResult, look: dict, ets: int, width: int = 42
                 m = owner == i
                 out[m] = layer[m]
         return blend(small, out, a_small)
-    return _memo(("thumb", look["id"], ets, width), build, keep=40)
+    return _memo(("thumb", look["id"], ets, width), build)
 
 
 def _use_look(result: seg.SegmentationResult, look: dict) -> None:

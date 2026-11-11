@@ -537,6 +537,33 @@ def _straighten_regions(regions: List[WallRegion], edges: np.ndarray, objects: n
     return _name_regions(regions), union
 
 
+def _log_memory(where: str) -> None:
+    """One line in the server log: memory now and at peak (helps when the server runs out)."""
+    try:
+        import resource
+        import sys
+
+        with open("/proc/self/statm") as f:
+            rss_mb = int(f.read().split()[1]) * (resource.getpagesize() / 2**20)
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[apex] memory {where}: {rss_mb:.0f} MB now, {peak_mb:.0f} MB peak", file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 - not on Linux, etc.
+        pass
+
+
+def release_memory() -> None:
+    """Give freed memory back to the system (Linux keeps it otherwise, and the app counts it)."""
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001 - not glibc
+        pass
+
+
 class WallSegmenter:
     """Runs SegFormer on a photo and returns walls plus a full label map."""
 
@@ -556,8 +583,16 @@ class WallSegmenter:
     def from_path(cls, model_path: Path) -> "WallSegmenter":
         import onnxruntime as ort
 
+        from src.config import WALL_MODEL_THREADS
+
         opts = ort.SessionOptions()
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+        # Memory: by default ONNX Runtime keeps a big memory pool after the first run (and one per thread).
+        # On a 1 GB server that, plus the rest of the app, can get the process killed ("Oh no").
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
+        opts.intra_op_num_threads = max(1, WALL_MODEL_THREADS)
+        opts.inter_op_num_threads = 1
         session = ort.InferenceSession(str(model_path), sess_options=opts, providers=["CPUExecutionProvider"])
         return cls(session, _read_id2label(model_path))
 
@@ -609,9 +644,11 @@ class WallSegmenter:
         from src.colour_studio.refine import feather, refine_wall
 
         t0 = time.perf_counter()
+        _log_memory("before wall model")
         img = to_working_size(image_rgb)
         H, W = img.shape[:2]
         probs = self._probs(img)                        # (C, h, w) at 1/4 of the model input
+        _log_memory("after wall model")
         C = probs.shape[0]
 
         wall_ids = list(self.wall_ids)
@@ -625,6 +662,8 @@ class WallSegmenter:
         label_map = cv2.resize(labels_low.astype(np.uint8 if C <= 255 else np.uint16), (W, H),
                                interpolation=cv2.INTER_NEAREST).astype(np.int32)
 
+        del probs                                       # the 150-class scores aren't needed any more
+        release_memory()
         wall, edges, objects = refine_wall(img, p_wall, label_map, conf, self.id2label, return_parts=True)
         regions = split_into_walls(img, wall)
         regions, wall = _straighten_regions(regions, edges, objects, wall)
