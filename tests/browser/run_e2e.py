@@ -261,9 +261,10 @@ def counter_flow(pw, db: Path):
     check("WhatsApp opens with the bill", any("wa.me/919876543210" in u or "api.whatsapp.com" in u or "whatsapp" in u
                                              for u in popups), popups[-1:] or "no popup")
     sc.locator("#next").click()
-    phone.wait_for_timeout(2500)
-    check("Next customer: camera on again, bill cleared",
-          sc.locator("video").evaluate("v => !!v.srcObject") and "empty" in sc.locator("#cart").inner_text(),
+    phone.wait_for_timeout(300)                  # before the label video comes round to a label again
+    cleared = (not sc.locator("#receipt").is_visible()) and "empty" in sc.locator("#cart").inner_text()
+    sc.locator("video").evaluate("v => new Promise(r => { if (v.srcObject) r(); else setTimeout(r, 2500); })")
+    check("Next customer: bill cleared, camera on again", cleared and sc.locator("video").evaluate("v => !!v.srcObject"),
           sc.locator("#state").inner_text())
     sc.locator("#stop").click()
     settle(phone)
