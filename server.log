@@ -1,0 +1,16 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8599
+  Network URL: http://10.0.133.50:8599
+  External URL: http://3.42.157.18:8599
+
+[apex] Python 3.13.18 | streamlit 1.52.2 | pandas 2.3.3 | numpy 2.5.4 | pyarrow 26.0.1 | cv2 4.14.0 | PIL 12.3.0 | plotly 7.1.0 | onnxruntime 1.32.0
+[apex] memory before wall model: 398 MB now, 398 MB peak
+[apex] memory after wall model: 484 MB now, 1059 MB peak
+[ WARN:10@15.146] global cap_v4l.cpp:914 open VIDEOIO(V4L2:/dev/video0): can't open camera by index
+[ WARN:10@15.146] global cap_ffmpeg_impl.hpp:1246 open VIDEOIO/FFMPEG: OpenCV should be configured with libavdevice to open a camera device
+[ WARN:383@200.282] global cap_v4l.cpp:914 open VIDEOIO(V4L2:/dev/video0): can't open camera by index
+[apex] memory before wall model: 529 MB now, 1059 MB peak
+[apex] memory after wall model: 572 MB now, 1198 MB peak
+  Stopping...

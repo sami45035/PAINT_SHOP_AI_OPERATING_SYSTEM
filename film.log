@@ -1,0 +1,26 @@
+videos in /home/runner/work/_temp/demo/videos
+[laptop] camera_setup
+[laptop] camera_setup_end
+[laptop] camera_live
+[laptop] camera_live_end
+[phone] scan
+[phone] scan_end
+[phone] asking
+[phone] asking_end
+[laptop] camera_b
+[laptop] camera_b_end
+[laptop] buyers
+[laptop] buyers_end
+[laptop] overview
+[laptop] overview_end
+[laptop] forecast
+[laptop] forecast_end
+[laptop] colour
+[laptop] colour_end
+[laptop] stock
+[laptop] stock_end
+[laptop] alerts
+[laptop] alerts_end
+[laptop] aura
+[laptop] aura_end
+clips: ['camera_setup', 'camera_live', 'scan', 'asking', 'camera_b', 'buyers', 'overview', 'forecast', 'colour', 'stock', 'alerts', 'aura']
