@@ -1,0 +1,42 @@
+# Films the demo (tests/browser/record_demo.py) with the real Streamlit and Chromium.
+# Runs on pushes to the demo-video branch; the clips are pushed to the demo-results branch.
+name: demo
+
+on:
+  push:
+    branches: [demo-video]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  film:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-color-emoji
+          pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Film
+        run: python tests/browser/record_demo.py "$RUNNER_TEMP/demo" 2>&1 | tee film.log
+      - name: Publish clips
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/results"; mkdir -p "$out"
+          cp film.log "$out"/ || true
+          cp "$RUNNER_TEMP"/demo/clips/*.mp4 "$out"/ 2>/dev/null || true
+          cp "$RUNNER_TEMP"/demo/marks.json "$RUNNER_TEMP"/demo/server.log "$out"/ 2>/dev/null || true
+          echo "${GITHUB_SHA}" > "$out/commit.txt"
+          cd "$out"
+          git init -q -b demo-results
+          git config user.name "demo bot"; git config user.email "demo@users.noreply.github.com"
+          git add -A && git commit -qm "demo clips for ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" demo-results
