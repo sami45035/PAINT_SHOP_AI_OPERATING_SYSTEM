@@ -17,7 +17,7 @@ sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "data"))
 
 from src.config import SAMPLE_DB_PATH as DB_PATH, SHADES_CATALOG_PATH
-from src.clock import today as store_today
+from src import clock
 
 def init_db():
     if DB_PATH.exists():
@@ -206,7 +206,7 @@ def populate_database(conn):
     # 3. Populate Inventory with Batches & Realistic Statuses
     # The sample data ends on the day it is generated (store time zone).
     # In demo mode the app keeps moving it forward so it always ends "today".
-    today = datetime.combine(store_today(), datetime.min.time())
+    today = datetime.combine(clock.today(), datetime.min.time())
 
     slow_ids = set()   # deliberately slow sellers ("money stuck" demo)
     for idx, prod in enumerate(products_inserted):
@@ -436,6 +436,16 @@ def populate_database(conn):
     print(f"Total Footfall Logs: {cursor.execute('SELECT COUNT(*) FROM footfall_logs;').fetchone()[0]}")
     print(f"Total Security Events: {cursor.execute('SELECT COUNT(*) FROM security_events;').fetchone()[0]}")
     conn.close()
+
+def build(path) -> None:
+    """Write the sample database (dated so its last day is today) to `path`."""
+    global DB_PATH
+    saved, DB_PATH = DB_PATH, Path(path)
+    try:
+        populate_database(init_db())
+    finally:
+        DB_PATH = saved
+
 
 if __name__ == "__main__":
     conn = init_db()

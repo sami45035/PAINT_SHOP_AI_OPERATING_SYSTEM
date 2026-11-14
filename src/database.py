@@ -113,6 +113,63 @@ def ensure_live_db() -> bool:
 
 # --- Demo data upkeep ---------------------------------------------------------
 
+def _has_shop_data(conn: sqlite3.Connection) -> bool:
+    """Anything the shop itself recorded (bills, a real camera, linked barcodes) that a rebuild would lose."""
+    checks = ("SELECT 1 FROM bills WHERE source = 'app' LIMIT 1;",
+              "SELECT 1 FROM no_sales WHERE source = 'app' LIMIT 1;",
+              "SELECT 1 FROM visits WHERE source = 'camera' LIMIT 1;",
+              "SELECT 1 FROM footfall_logs WHERE source = 'camera' LIMIT 1;",
+              "SELECT 1 FROM product_codes LIMIT 1;")
+    for sql in checks:
+        try:
+            if conn.execute(sql).fetchone():
+                return True
+        except sqlite3.OperationalError:
+            continue        # table not there yet
+    return False
+
+
+def _rebuild_sample_for_today() -> bool:
+    """Replace the live database with freshly generated sample data ending today. False if that failed."""
+    import importlib.util
+    import sys as _sys
+    import uuid
+
+    seed_dir = SAMPLE_DB_PATH.parent
+    tmp = DB_PATH.with_name(f".{DB_PATH.name}.{uuid.uuid4().hex}.build")
+    try:
+        if str(seed_dir) not in _sys.path:
+            _sys.path.insert(0, str(seed_dir))
+        spec = importlib.util.spec_from_file_location("_apex_seed", seed_dir / "seed_data.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        import contextlib
+        import io as _io
+
+        with contextlib.redirect_stdout(_io.StringIO()):
+            mod.build(tmp)
+        sid = _seed_id(SAMPLE_DB_PATH)
+        with sqlite3.connect(tmp) as c:              # same stamp as the repo's sample, so it isn't copied over again
+            if sid:
+                c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('seed_id', ?);", (sid,))
+        with _LIVE_LOCK:
+            for extra in ("-wal", "-shm"):
+                old = DB_PATH.with_name(DB_PATH.name + extra)
+                if old.exists():
+                    old.unlink()
+            tmp.replace(DB_PATH)
+            _WAL_DONE.discard(str(DB_PATH))
+        ensure_app_tables()
+        return True
+    except Exception as exc:                          # fall back to moving the dates
+        print(f"[apex] rebuilding sample data failed, shifting dates instead: {exc!r}", file=_sys.stderr)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def ensure_demo_dates_current() -> int:
     """
     In demo mode, move every seeded date forward so the newest sale is today.
@@ -128,13 +185,20 @@ def ensure_demo_dates_current() -> int:
     if not DEMO_MODE:
         return 0
     with get_connection() as conn:
-        cur = conn.cursor()
-        latest = cur.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales;").fetchone()[0]
+        latest = conn.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales;").fetchone()[0]
         if not latest:
             return 0
         delta = (clock.today() - datetime.strptime(latest, "%Y-%m-%d").date()).days
         if delta <= 0:
             return 0
+        keep = _has_shop_data(conn)
+    # Moving dates by a number of days that isn't whole weeks would move the
+    # Saturday rush to another weekday. When there's nothing of the shop's own
+    # to keep, rebuild the sample data for today instead (under a second).
+    if delta % 7 and not keep and DB_PATH != SAMPLE_DB_PATH and _rebuild_sample_for_today():
+        return delta
+    with get_connection() as conn:
+        cur = conn.cursor()
         mod = f"+{delta} days"
         cur.execute("UPDATE sales SET sale_timestamp = DATETIME(sale_timestamp, ?);", (mod,))
         # Only seeded rows move; what a real camera counted stays on its real day
@@ -147,8 +211,12 @@ def ensure_demo_dates_current() -> int:
                         "WHERE source = 'sample';", (mod, mod))
             cur.execute("UPDATE shelf_events SET at = DATETIME(at, ?) WHERE source = 'sample';", (mod,))
             cur.execute("UPDATE shelf_status SET updated_at = DATETIME(updated_at, ?) WHERE source = 'sample';", (mod,))
+            cur.execute("UPDATE visits SET counter_from = DATETIME(counter_from, ?), counter_to = DATETIME(counter_to, ?) "
+                        "WHERE source = 'sample' AND counter_from IS NOT NULL;", (mod, mod))
+            cur.execute("UPDATE bills SET created_at = DATETIME(created_at, ?) WHERE source = 'sample';", (mod,))
+            cur.execute("UPDATE no_sales SET at = DATETIME(at, ?) WHERE source = 'sample';", (mod,))
         except sqlite3.OperationalError:
-            pass   # older database without camera tables
+            pass   # older database without camera / billing tables
         cur.execute(
             "UPDATE inventory SET purchase_date = DATE(purchase_date, ?), expiry_date = DATE(expiry_date, ?);",
             (mod, mod),

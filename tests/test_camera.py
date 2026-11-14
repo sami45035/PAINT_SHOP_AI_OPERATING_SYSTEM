@@ -33,7 +33,9 @@ def setUpModule():
     import src.colour_assistant as ca
     import src.sales_forecast as sf
 
-    for mod in (cfg, db, si, predictor, sa, ca, sf):
+    import src.billing as billing
+
+    for mod in (cfg, db, si, predictor, sa, ca, sf, billing):
         p = mock.patch.object(mod, "DB_PATH", TMP_DB)
         p.start()
         _PATCHES.append(p)
@@ -271,25 +273,32 @@ class TestPeopleInView(unittest.TestCase):
         self.assertAlmostEqual(stays[1], 4.5, delta=1.0)
 
     def test_camera_bills_only_since_it_started(self):
+        """With a real camera, 'bought' counts bills saved in Scan & Bill since the camera started."""
+        from src import billing
         from src import shop_insights as si
 
+        def clean():
+            with sqlite3.connect(TMP_DB) as c:
+                c.execute("DELETE FROM visits WHERE source='camera';")
+                c.execute("DELETE FROM footfall_logs WHERE source='camera';")
+                c.execute("DELETE FROM bills WHERE source='app';")
+
         with Frozen(19):
-            with sqlite3.connect(TMP_DB) as c:
-                c.execute("DELETE FROM visits WHERE source='camera';")
-                c.execute("DELETE FROM footfall_logs WHERE source='camera';")
-            db.log_visit("camera", clock.now_naive() - timedelta(minutes=30), clock.now_naive() - timedelta(minutes=25),
-                         True, [], 0, 0, "reached_counter")
-            db.log_footfall(1, 1, at=clock.now_naive() - timedelta(minutes=30))
-            b = si.buyers("camera")
-            with sqlite3.connect(TMP_DB) as c:
-                n = c.execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? AND sale_timestamp <= ?",
-                              (b["since"], clock.now_naive().strftime("%Y-%m-%d %H:%M:%S"))).fetchone()[0]
-            self.assertEqual(b["bills"], n)
-            self.assertEqual(b["since"][11:16], (clock.now_naive() - timedelta(minutes=30)).strftime("%H:%M"))
-            si.daily_footfall("camera")                         # used to crash on Streamlit Cloud's pandas
-            with sqlite3.connect(TMP_DB) as c:
-                c.execute("DELETE FROM visits WHERE source='camera';")
-                c.execute("DELETE FROM footfall_logs WHERE source='camera';")
+            clean()
+            try:
+                start = clock.now_naive() - timedelta(minutes=30)
+                pid = int(si.pd.read_sql_query("SELECT product_id FROM inventory WHERE current_stock > 3 LIMIT 1;",
+                                               sqlite3.connect(TMP_DB))["product_id"].iloc[0])
+                billing.create_bill([{"product_id": pid, "qty": 1}], at=start - timedelta(minutes=5))   # before: not counted
+                billing.create_bill([{"product_id": pid, "qty": 1}], at=start + timedelta(minutes=3))   # after: counted
+                db.log_visit("camera", start, start + timedelta(minutes=5), True, [], 0, 0, "reached_counter")
+                db.log_footfall(1, 1, at=start)
+                b = si.buyers("camera")
+                self.assertEqual(b["bills"], 1)
+                self.assertEqual(b["since"][11:16], start.strftime("%H:%M"))
+                si.daily_footfall("camera")                         # used to crash on Streamlit Cloud's pandas
+            finally:
+                clean()
 
 
 class TestRatio(unittest.TestCase):

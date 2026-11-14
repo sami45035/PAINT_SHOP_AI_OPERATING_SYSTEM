@@ -33,12 +33,57 @@ def _cart() -> List[Dict]:
 
 
 def _add(product_id: int, qty: int = 1) -> None:
+    SS.setdefault("sb_undo", []).append((int(product_id), int(qty)))
     cart = _cart()
     for line in cart:
         if line["product_id"] == product_id:
             line["qty"] += qty
             return
     cart.append({"product_id": int(product_id), "qty": int(qty)})
+
+
+def _notice(kind: str, text: str) -> None:
+    """A short message over the camera (and under it)."""
+    SS["sb_notice_n"] = SS.get("sb_notice_n", 0) + 1
+    SS["sb_flash"] = ("healthy" if kind == "ok" else "soon", text)
+    SS["sb_notice"] = {"id": SS["sb_notice_n"], "text": text, "kind": kind}
+
+
+def _summary() -> Dict:
+    """What the camera overlay shows: cans, total and the lines (last scanned first)."""
+    cat = _catalogue().set_index("product_id")
+    lines, total, count, short = [], 0.0, 0, []
+    for line in _cart():
+        if line["product_id"] not in cat.index:
+            continue
+        r = cat.loc[line["product_id"]]
+        total += line["qty"] * float(r["selling_price"])
+        count += line["qty"]
+        if int(r["in_stock"]) < line["qty"]:
+            short.append(str(r["label"]))
+        lines.append({"qty": line["qty"], "label": str(r["label"]), "hex": str(r["hex_code"])})
+    return {"count": count, "total": rupees(total), "total_value": total, "lines": lines[::-1], "short": short}
+
+
+def _save(allow_short: bool) -> bool:
+    """Save the cart as a bill (customer and payment as chosen below, Walk-in / Cash by default)."""
+    cart = _cart()
+    if not cart:
+        return False
+    try:
+        bill = billing.create_bill(cart, customer_type=SS.get("sb_ctype") or billing.CUSTOMER_TYPES[0],
+                                   phone=SS.get("sb_phone", ""), payment_mode=SS.get("sb_pay") or billing.PAYMENT_MODES[0],
+                                   allow_short=allow_short)
+    except billing.StockError as exc:
+        _notice("warn", f"Not enough stock: {exc}")
+        return False
+    SS["sb_cart"] = []
+    SS["sb_undo"] = []
+    SS["sb_done"] = bill
+    SS["sb_reset_phone"] = True                    # next customer starts with an empty number
+    _notice("ok", f"Saved {bill['invoice_no']} · {rupees(bill['total'])}")
+    _changed_stock()
+    return True
 
 
 def _changed_stock() -> None:
@@ -48,22 +93,47 @@ def _changed_stock() -> None:
 
 
 # ----------------------------------------------------------------------------- scanning
+def _undo() -> None:
+    stack = SS.get("sb_undo") or []
+    if not stack:
+        return
+    pid, qty = stack.pop()
+    for i, line in enumerate(_cart()):
+        if line["product_id"] == pid:
+            line["qty"] -= qty
+            if line["qty"] <= 0:
+                _cart().pop(i)
+            break
+    _notice("ok", "Removed the last can")
+
+
 def _scanner() -> None:
     with st.container(border=True):
-        _title("1 · Scan the cans", "QR labels from this app, or the barcode printed on the can (linked once)")
-        val = code_scanner(key="sb_scanner")
+        _title("1 · Scan the cans", "Start once — the camera stays on. The cart and Save button are on the camera.")
+        summary = _summary()
+        val = code_scanner(key="sb_scanner", cart=summary, notice=SS.get("sb_notice"))
         if val and val.get("ts") and val["ts"] != SS.get("sb_last_scan"):
             SS["sb_last_scan"] = val["ts"]
-            hit = billing.lookup_code(val["code"])
-            if hit:
-                _add(int(hit["product_id"]))
-                SS["sb_flash"] = ("healthy", f"Added {hit['label']} · {hit['brand']}")
-            else:
-                SS["sb_unknown"] = val["code"]
-                SS["sb_flash"] = ("soon", f"Code {val['code']} isn't linked to a product yet")
+            act = val.get("action")
+            if act == "save":
+                if summary["short"]:
+                    _notice("warn", "Stock book shows fewer cans — check the bill below")
+                else:
+                    _save(allow_short=False)
+            elif act == "undo":
+                _undo()
+            elif val.get("code"):
+                hit = billing.lookup_code(val["code"])
+                if hit:
+                    _add(int(hit["product_id"]))
+                    _notice("ok", f"+1 {hit['label']}")
+                else:
+                    SS["sb_unknown"] = val["code"]
+                    _notice("warn", f"New code {val['code']} — link it below")
+            st.rerun()                                   # the overlay shows the new cart at once
         flash = SS.get("sb_flash")
         if flash:
-            html(f'<div style="margin:6px 0">{chip(flash[0], "Scanned")} <span>{escape(flash[1])}</span></div>')
+            html(f'<div style="margin:6px 0">{chip(flash[0], "Last")} <span>{escape(flash[1])}</span></div>')
 
         unknown = SS.get("sb_unknown")
         cat = _catalogue()
@@ -85,17 +155,21 @@ def _scanner() -> None:
                     SS["sb_unknown"] = None
                     st.rerun()
 
-        html('<div class="apx-label" style="margin-top:10px">No label? Add by name</div>')
-        a, b, c = st.columns([5, 1.2, 1.4], vertical_alignment="bottom")
-        with a:
-            pid = st.selectbox("Product", list(opts), format_func=opts.get, key="sb_pick", index=None,
-                               placeholder="Type a shade, brand or pack…", label_visibility="collapsed")
-        with b:
-            qty = st.number_input("Qty", 1, 200, 1, 1, key="sb_pick_qty", label_visibility="collapsed")
-        with c:
-            if st.button("Add", use_container_width=True, disabled=pid is None, key="sb_add"):
-                _add(int(pid), int(qty))
-                st.rerun()
+        with st.expander("No label? Add by name"):
+            _by_name(opts)
+
+
+def _by_name(opts: Dict[int, str]) -> None:
+    a, b, c = st.columns([5, 1.2, 1.4], vertical_alignment="bottom")
+    with a:
+        pid = st.selectbox("Product", list(opts), format_func=opts.get, key="sb_pick", index=None,
+                           placeholder="Type a shade, brand or pack…", label_visibility="collapsed")
+    with b:
+        qty = st.number_input("Qty", 1, 200, 1, 1, key="sb_pick_qty", label_visibility="collapsed")
+    with c:
+        if st.button("Add", use_container_width=True, disabled=pid is None, key="sb_add"):
+            _add(int(pid), int(qty))
+            st.rerun()
 
 
 # ----------------------------------------------------------------------------- the bill
@@ -142,29 +216,21 @@ def _bill() -> None:
                  f'<span class="apx-kpi" style="font-size:28px">{rupees(total)}</span></div>')
             a, b = st.columns(2)
             with a:
-                ctype = st.radio("Customer", billing.CUSTOMER_TYPES, horizontal=True, key="sb_ctype")
+                st.radio("Customer", billing.CUSTOMER_TYPES, horizontal=True, key="sb_ctype")
             with b:
-                pay = st.radio("Payment", billing.PAYMENT_MODES, horizontal=True, key="sb_pay")
-            phone = st.text_input("Customer's mobile (optional — to send the bill on WhatsApp)", key="sb_phone",
-                                  placeholder="10-digit mobile")
+                st.radio("Payment", billing.PAYMENT_MODES, horizontal=True, key="sb_pay")
+            st.text_input("Customer's mobile (optional — to send the bill on WhatsApp)", key="sb_phone",
+                          placeholder="10-digit mobile")
             if short:
                 banner("soon", "Stock", f"The stock book shows fewer cans than this bill for: {escape(', '.join(short))}. "
                                         "Recount the shelf, or save anyway and the stock goes to zero.")
             c1, c2 = st.columns([2, 1])
             if c1.button(f"Save bill · {rupees(total)}", type="primary", use_container_width=True, key="sb_save"):
-                try:
-                    bill = billing.create_bill(cart, customer_type=ctype, phone=phone, payment_mode=pay,
-                                               allow_short=bool(short))
-                except billing.StockError as exc:
-                    st.error(f"Not enough stock: {exc}")
-                    return
-                SS["sb_cart"] = []
-                SS["sb_done"] = bill
-                SS["sb_flash"] = None
-                _changed_stock()
+                _save(allow_short=bool(short))
                 st.rerun()
             if c2.button("Clear", use_container_width=True, key="sb_clear"):
                 SS["sb_cart"] = []
+                SS["sb_undo"] = []
                 st.rerun()
 
     done = SS.get("sb_done")
@@ -270,13 +336,15 @@ def _labels() -> None:
 
 
 def render() -> None:
+    if SS.pop("sb_reset_phone", False):
+        SS["sb_phone"] = ""
     page_header("Scan & Bill", "Scan the cans, save the bill — stock goes down at once, and the camera knows who bought.")
     left, right = st.columns([5, 6], gap="large")
     with left:
         _scanner()
-        _didnt_buy()
     with right:
         _bill()
+    _didnt_buy()
     _today()
     _labels()
     html('<div class="apx-muted" style="margin-top:6px">Tip: open this screen on the counter phone and Store Camera on the '

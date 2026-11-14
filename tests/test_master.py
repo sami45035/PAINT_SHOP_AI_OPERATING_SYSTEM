@@ -35,7 +35,8 @@ def setUpModule():
     import src.shop_insights as si
     import src.smart_alerts as sa
 
-    _DB_PATCH = [mock.patch.object(m, "DB_PATH", tmp) for m in (db, cfg, ca, predictor, sf, si, sa)]
+    import src.billing as billing
+    _DB_PATCH = [mock.patch.object(m, "DB_PATH", tmp) for m in (db, cfg, ca, predictor, sf, si, sa, billing)]
     for p in _DB_PATCH:
         p.start()
     db.ensure_app_tables()
@@ -99,9 +100,14 @@ class TestLayer1Data(unittest.TestCase):
         self.assertGreaterEqual(len(inv), 90)
 
     def test_demo_dates_shift_forward_together(self):
+        """The shop has its own data (a bill) -> everything moves by the same number of days, nothing is lost."""
         tmp = Path(tempfile.mkdtemp()) / "shop.db"
         shutil.copy(DB_PATH, tmp)
         with sqlite3.connect(tmp) as c:
+            from src.billing import ensure_tables
+            ensure_tables(c)
+            c.execute("INSERT INTO bills (invoice_no, created_at, source, customer_type, payment_mode, items, total, status) "
+                      "VALUES ('APX-KEEP', '2026-01-01 10:00:00', 'app', 'Retail Walk-in', 'Cash', 1, 100, 'paid');")
             latest = c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0]
             exp_before = c.execute("SELECT expiry_date FROM inventory WHERE id = 1").fetchone()[0]
         future = datetime.strptime(latest, "%Y-%m-%d").date() + timedelta(days=10)
@@ -114,6 +120,26 @@ class TestLayer1Data(unittest.TestCase):
             exp_after = c.execute("SELECT expiry_date FROM inventory WHERE id = 1").fetchone()[0]
         delta = (datetime.strptime(exp_after, "%Y-%m-%d") - datetime.strptime(exp_before, "%Y-%m-%d")).days
         self.assertEqual(delta, 10)
+        with sqlite3.connect(tmp) as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM bills WHERE invoice_no='APX-KEEP'").fetchone()[0], 1)
+
+    def test_demo_rebuild_keeps_weekends_busy(self):
+        """Only sample data and not a whole number of weeks behind -> rebuilt for today, Saturday stays the busy day."""
+        tmp = Path(tempfile.mkdtemp()) / "shop.db"
+        shutil.copy(DB_PATH, tmp)
+        with sqlite3.connect(tmp) as c:
+            latest = c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0]
+        future = datetime.strptime(latest, "%Y-%m-%d").date() + timedelta(days=3)
+        with mock.patch.object(db, "DB_PATH", tmp), mock.patch.object(db, "DEMO_MODE", True), \
+                mock.patch.object(db.clock, "today", return_value=future):
+            self.assertEqual(db.ensure_demo_dates_current(), 3)
+            self.assertEqual(db.ensure_demo_dates_current(), 0)
+        with sqlite3.connect(tmp) as c:
+            self.assertEqual(c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0], future.isoformat())
+            by_day = dict(c.execute("SELECT strftime('%w', sale_timestamp), COUNT(*) FROM sales GROUP BY 1").fetchall())
+            self.assertEqual(c.execute("SELECT value FROM app_settings WHERE key='seed_id'").fetchone()[0],
+                             db._seed_id(DB_PATH))                     # not mistaken for a new sample
+        self.assertEqual(max(by_day, key=by_day.get), "6")             # Saturday
 
 
 # --------------------------------------------------------------------- Layer 2

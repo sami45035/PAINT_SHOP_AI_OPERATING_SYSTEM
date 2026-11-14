@@ -53,6 +53,8 @@ Open `http://localhost:8501`.
 Every screen runs inside a safety net (`src/safety.py`): an error shows a message on that screen with its details instead of taking the whole app down ("Oh no" on Streamlit Cloud). The last problems are listed under **Settings** in the sidebar and written to `data/live/errors.log` and the server log (lines starting `[apex] ERROR`).
 
 ### Demo mode
+
+When the sample data is out of date it is rebuilt for today (under a second) so the weekend rush stays on weekends; if the shop already has its own bills or camera data, the dates are moved forward instead so nothing is lost.
 The sample data is moved forward automatically so its last day is always "today" (expiry dates move with it). When the shop runs on real data, turn this off:
 
 ```powershell
@@ -125,7 +127,7 @@ To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 The billing counter, inside the app (`src/billing.py`, screen `src/ui/pages/scan_bill.py`).
 
 1. **Print labels** (expander at the bottom): an A4 PDF of QR labels, 21 per page — fast movers, chosen products or all. Each QR holds `APX:<SKU>`.
-2. **Scan** with the laptop or phone camera (QR, EAN-13, Code-128… via the browser's barcode reader, jsQR as a fallback). Each scan adds one can; the same can held in view isn't counted twice. A can's own barcode can be **linked once** to a product and then scans directly. Or add by name.
+2. **Scan** with the laptop or phone camera (QR, EAN-13, Code-128… via the browser's barcode reader, jsQR as a fallback). Press **Start scanner** once — it stays on between scans, after saving, and comes back by itself if the page reloads (it pauses while the phone is locked). Each scan adds one can (the same can held in view isn't counted twice); the cart — count, colours, total, **Undo** and **Save bill** — sits on the camera picture, so on a phone you never scroll. A can's own barcode can be **linked once** to a product and then scans directly. Or add by name.
 3. **Save bill** — in one transaction: a `bills` row, one `sales` row per line, and stock goes down can by can from the batch that **expires first** (FIFO). Two counters can't both sell the last can. If the shelf has a can the system thinks is gone, the bill can still be saved (stock stops at 0, never below) — that's a count to fix.
 4. **Send on WhatsApp** — the bill as a message to the customer's number (no API needed).
 5. **Void** a wrong bill — the exact cans go back to the exact batches.

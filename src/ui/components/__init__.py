@@ -82,6 +82,11 @@ def decode_image(data_url: str):
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
 
 
-def code_scanner(*, key: str):
-    """QR / barcode scanner in the browser. Returns {'code', 'format', 'ts'} for the latest scan, or None."""
-    return _component("code_scanner")(key=key, default=None)
+def code_scanner(*, key: str, cart: Optional[dict] = None, notice: Optional[dict] = None):
+    """
+    QR / barcode scanner in the browser; the camera stays on between scans.
+    cart   -> shown over the camera: {'count', 'total', 'lines': [{'qty', 'label', 'hex'}]}
+    notice -> a short message over the camera: {'id', 'text', 'kind': 'ok'|'warn'}
+    Returns the latest event: {'code', 'format', 'ts'} for a scan or {'action': 'save'|'undo', 'ts'}, or None.
+    """
+    return _component("code_scanner")(key=key, default=None, cart=cart, notice=notice)
