@@ -27,7 +27,7 @@ except Exception:
 
 import streamlit as st  # noqa: E402
 
-st.set_page_config(page_title="Apex Paint AI", page_icon="🎨", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Apex Paint AI", page_icon="🎨", layout="wide", initial_sidebar_state="auto")   # open on a laptop, closed on a phone
 
 from src import clock  # noqa: E402
 from src.config import DEMO_MODE, ESP32_DEFAULT_STREAM_URL, STORE_SHORT_NAME  # noqa: E402
