@@ -196,13 +196,23 @@ def still(png, out, secs):
     tmp.rename(out)
 
 
-def laptop_scene(clip, cap, out):
-    d = duration(clip)
+# camera scenes: zoom to the camera picture and its counts, and hold the last frame (the staff tag appears late)
+ZOOM = {"camera_live": (490, 318, 1216, 684), "camera_b": (490, 318, 1216, 684)}
+HOLD = {"camera_live": 3.0, "camera_b": 1.5, "buyers": 1.0}
+
+
+def laptop_scene(clip, cap, out, name=""):
+    hold = HOLD.get(name, 0.0)
+    d = duration(clip) + hold
+    zoom = ZOOM.get(name)
+    pre = (f"crop={zoom[2]}:{zoom[3]}:{zoom[0]}:{zoom[1]}," if zoom else "") + f"scale={W}:{H}:flags=lanczos"
+    if hold:
+        pre += f",tpad=stop_mode=clone:stop_duration={hold}"
     tmp = out.with_name(out.stem + ".part.mp4")
     run(["-i", str(clip), "-framerate", str(FPS), "-i", str(cap), "-filter_complex",
          f"[1:v]format=rgba,loop=-1:1,trim=duration={d},fade=t=in:st=0.4:d=0.5:alpha=1"
          f"{f',fade=t=out:st={CAPTION_S}:d=0.6:alpha=1' if d > CAPTION_S + 2.5 else ''}[c];"
-         f"[0:v]scale={W}:{H}[v];[v][c]overlay=0:0:format=auto,"
+         f"[0:v]{pre}[v];[v][c]overlay=0:0:format=auto,"
          f"fade=t=in:st=0:d=0.35,fade=t=out:st={max(0, d - 0.35)}:d=0.35,format=yuv420p",
          "-t", str(d), *ENC, str(tmp)])
     tmp.rename(out)
@@ -242,7 +252,7 @@ def main():
                 continue
             if kind == "laptop":
                 caption_png(work / f"cap_{name}.png", title, line)
-                laptop_scene(clip, work / f"cap_{name}.png", part)
+                laptop_scene(clip, work / f"cap_{name}.png", part, name)
             else:
                 size = (int(540 * 0.82), int(1170 * 0.82) // 2 * 2)
                 pos = phone_bg(work / f"bg_{name}.png", work / f"mask_{name}.png", title, line, size)

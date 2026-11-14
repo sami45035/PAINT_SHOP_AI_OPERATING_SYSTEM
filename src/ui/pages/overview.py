@@ -3,6 +3,8 @@ from html import escape
 
 import streamlit as st
 
+from datetime import datetime
+
 from src import clock
 from src.dashboard_views import render_hourly_traffic_chart, render_sales_trend_chart
 from src.formatting import rupees, rupees_short
@@ -20,9 +22,20 @@ def _season_banner(day: str) -> None:
     if s["active"]:
         ev = s["active"][0]
         end = clock.fmt_day(ev["end"])
-        banner("info", "Season",
-               f"<b>{escape(ev['event_name'])}</b> (until {end}) — {escape(ev['impact_category'])} demand about "
-               f"<b>{ev['expected_multiplier']:g}×</b> normal.{nxt_txt}")
+        # what the forecast learned from this shop's sales, if it has seen this season (the calendar is a guess)
+        learned = []
+        try:
+            learned = [e for e in data.forecast_outlook(day)["events"]
+                       if e["name"] == ev["event_name"] and e.get("days_seen")]
+        except Exception:  # noqa: BLE001 - the banner must not fail because the forecast did
+            learned = []
+        if learned:
+            parts = ", ".join(f"<b>{e['learned']:.2g}×</b> on {escape(e['group'].lower())}"
+                              for e in sorted(learned, key=lambda e: -e["learned"]))
+            text = f"your sales show {parts} (the calendar guessed {ev['expected_multiplier']:g}×)"
+        else:
+            text = f"{escape(ev['impact_category'])} demand about <b>{ev['expected_multiplier']:g}×</b> normal (calendar guess)"
+        banner("info", "Season", f"<b>{escape(ev['event_name'])}</b> (until {end}) — {text}.{nxt_txt}")
     elif nxt:
         banner("info", "Season", f"No festival or season effect today.{nxt_txt}")
 
@@ -89,8 +102,15 @@ def render() -> None:
         kpi_card("Cans sold", str(s["today_units"]), f"across {s['today_invoices']} bills")
     with c3:
         conv = s["today_conversion_pct"]
-        kpi_card("Visitors who bought", f"{conv:.1f}%" if conv is not None else "—",
-                 f"{s['today_invoices']} bills ÷ {s['today_visitors']} visitors" if s["today_visitors"] else "No visitor count yet")
+        b, v = s["today_bills_vs_visitors"], s["today_visitors"]
+        since = f" since {clock.fmt_time(datetime.strptime(s['camera_from'], '%Y-%m-%d %H:%M:%S'))}" if s.get("camera_from") else ""
+        if not v:
+            sub = "No visitor count yet"
+        elif conv is None:
+            sub = f"{b} bills{since}, camera counted {v} — it missed some people"
+        else:
+            sub = f"{b} bills ÷ {v} visitors{since}"
+        kpi_card("Visitors who bought", f"{conv:.1f}%" if conv is not None else "—", sub)
     with c4:
         kpi_card("Stock value (cost)", rupees_short(s["total_inventory_cost"]), f"{s['total_active_skus']} products on shelf")
     with c5:

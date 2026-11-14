@@ -134,6 +134,12 @@ def scroll(page, pixels, seconds=2.0, x=None, y=None):
         page.wait_for_timeout(40)
 
 
+def to_top(page):
+    """Streamlit scrolls inside its own panel (window.scrollTo does nothing): wheel back up."""
+    scroll(page, -6000, 1.2)
+    page.wait_for_timeout(300)
+
+
 def nav(page, title):
     glide(page, page.locator('[data-testid="stSidebarNav"] a, [data-testid="stSidebar"] a').filter(has_text=title).first)
     page.wait_for_timeout(400)
@@ -180,7 +186,7 @@ def film(pw, db):
     glide(laptop, sec, click=False)
     laptop.wait_for_timeout(3500)
     L.mark("camera_setup_end")
-    laptop.evaluate("() => window.scrollTo(0, 0)")
+    to_top(laptop)
     glide(laptop, laptop.get_by_role("tab", name="Live"))
     laptop.wait_for_timeout(500)
     cam = e2e.frame_of(laptop, "browser_cam")
@@ -239,7 +245,7 @@ def film(pw, db):
     L.mark("buyers_end")
 
     # ---------- the rest of the app, on the laptop
-    laptop.evaluate("() => window.scrollTo(0, 0)")
+    to_top(laptop)
     nav(laptop, "Overview")
     laptop.wait_for_timeout(600)
     L.mark("overview")
@@ -267,14 +273,17 @@ def film(pw, db):
     laptop.wait_for_timeout(4000)
     L.mark("forecast_end")
 
-    laptop.evaluate("() => window.scrollTo(0, 0)")
+    to_top(laptop)
     nav(laptop, "Colour Studio")
     laptop.wait_for_timeout(1000)
     L.mark("colour")
     laptop.wait_for_timeout(3000)
-    use = laptop.get_by_role("button", name="Use", exact=True)
-    if use.count() > 1:
-        glide(laptop, use.nth(1))                         # another suggested shade on the wall
+    # another suggested shade on the wall: a clearly different one (a near-white would look unpainted)
+    rows = laptop.locator('[data-testid="stHorizontalBlock"]').filter(has_text="Golden Radiance")
+    use = rows.last.get_by_role("button", name="Use", exact=True) if rows.count() else \
+        laptop.get_by_role("button", name="Use", exact=True)
+    if use.count():
+        glide(laptop, use.first)
         e2e.settle(laptop, timeout_s=120)
         laptop.wait_for_timeout(2500)
     look = laptop.get_by_role("button", name="Use this look")
@@ -284,7 +293,7 @@ def film(pw, db):
         glide(laptop, look.first)
         e2e.settle(laptop, timeout_s=120)
         laptop.wait_for_timeout(1500)
-        laptop.evaluate("() => window.scrollTo({top: 0, behavior: 'smooth'})")
+        scroll(laptop, -2600, 2.0)                        # back up to the photo, now in the look's colours
         laptop.wait_for_timeout(3500)
     L.mark("colour_end")
 
@@ -296,7 +305,7 @@ def film(pw, db):
     laptop.wait_for_timeout(2500)
     L.mark("stock_end")
 
-    laptop.evaluate("() => window.scrollTo(0, 0)")
+    to_top(laptop)
     nav(laptop, "Alerts")
     laptop.wait_for_timeout(800)
     L.mark("alerts")

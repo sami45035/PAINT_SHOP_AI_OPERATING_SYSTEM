@@ -331,12 +331,28 @@ def _day_totals(cur, d: date, until_time: str = "23:59:59") -> Dict[str, float]:
         f"AND {VISITOR_ROWS};",
         (ds, cap),
     ).fetchone()[0]
+    # On a day the real camera ran, visitors are what it counted since it was switched on, so only
+    # bills from then on can be set against them (the sample history has bills for the whole day).
+    cam_from = cur.execute("SELECT MIN(t) FROM (SELECT MIN(entered_at) AS t FROM visits WHERE source = 'camera' "
+                           "AND DATE(entered_at) = ? UNION ALL SELECT MIN(timestamp) FROM footfall_logs "
+                           "WHERE source = 'camera' AND DATE(timestamp) = ?);", (ds, ds)).fetchone()[0] \
+        if _has_table(cur, "visits") else None
+    bills_vs_visitors = int(sales[2])
+    if cam_from:
+        bills_vs_visitors = cur.execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? "
+                                        "AND sale_timestamp <= ?;", (cam_from, cap)).fetchone()[0]
     return {
         "revenue": float(sales[0]),
         "units": int(sales[1]),
         "bills": int(sales[2]),
         "visitors": int(visitors),
+        "bills_vs_visitors": int(bills_vs_visitors),
+        "camera_from": cam_from,
     }
+
+
+def _has_table(cur, name: str) -> bool:
+    return cur.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;", (name,)).fetchone() is not None
 
 
 def _pct_change(new: float, old: float) -> Optional[float]:
@@ -384,7 +400,11 @@ def get_sales_summary(days: int = 30, on_day: Optional[date] = None) -> Dict[str
         ).fetchone()[0]
 
     def conv(t):
-        return round(t["bills"] / t["visitors"] * 100.0, 1) if t["visitors"] else None
+        # bills since the camera started ÷ people it counted; more bills than visitors means the
+        # camera missed people, so there is no honest percentage to show
+        if not t["visitors"] or t["bills_vs_visitors"] > t["visitors"]:
+            return None
+        return round(t["bills_vs_visitors"] / t["visitors"] * 100.0, 1)
 
     return {
         "date": ref.strftime("%Y-%m-%d"),
@@ -393,6 +413,8 @@ def get_sales_summary(days: int = 30, on_day: Optional[date] = None) -> Dict[str
         "today_units": today_t["units"],
         "today_invoices": today_t["bills"],
         "today_visitors": today_t["visitors"],
+        "today_bills_vs_visitors": today_t["bills_vs_visitors"],
+        "camera_from": today_t["camera_from"],
         "today_conversion_pct": conv(today_t),
         "yesterday_revenue": round(yday_t["revenue"], 2),
         "yesterday_conversion_pct": conv(yday_t),

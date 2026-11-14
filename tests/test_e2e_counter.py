@@ -148,6 +148,21 @@ class TestCounterCamera(E2E):
         b = r["buyers"]
         self.assertEqual((b["bought_visits"], b["didnt_buy"], b["reasons"].get("just_asking")), (1, 1, 1), b)
 
+    def test_overview_compares_bills_since_the_camera_started(self):
+        """The Overview's 'visitors who bought' can't go over 100% because of sample bills from earlier today."""
+        r = run(self.tmp, COUNTER)
+        cam_from = r["visits"][0][0]
+        later = datetime.strptime(r["visits"][-1][1], "%Y-%m-%d %H:%M:%S") + timedelta(seconds=10)
+        with mock.patch.object(clock, "now_naive", return_value=later), \
+                mock.patch.object(clock, "now", return_value=later), mock.patch.object(clock, "today", return_value=later.date()):
+            s = db.get_sales_summary(30)
+            n = sqlite3.connect(self.tmp).execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? "
+                                                  "AND sale_timestamp <= ?", (cam_from, later.strftime("%Y-%m-%d %H:%M:%S"))).fetchone()[0]
+        self.assertEqual(s["today_visitors"], 2)
+        self.assertEqual(s["today_bills_vs_visitors"], n)
+        self.assertGreater(s["today_invoices"], n)                 # the day's sample bills from before 11:00
+        self.assertTrue(s["today_conversion_pct"] is None or s["today_conversion_pct"] <= 100)
+
     def test_visit_times_are_when_they_were_there(self):
         r = run(self.tmp, COUNTER)
         (a_in, a_out, _, _), (b_in, b_out, _, _) = r["visits"]
