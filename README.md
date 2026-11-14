@@ -65,13 +65,16 @@ set PAINT_SHOP_DEMO_MODE=0
 
 ## Sales Forecast
 
-The **Sales Forecast** screen shows the next 30 days (rupees or cans) with a likely range, festival periods, what will sell most, what the model learned (calendar guess vs your sales: e.g. Diwali 2.2× guessed, about 1.7× real for interior emulsion), the weekday pattern, a per-product view, and an honest accuracy test:
+The **Sales Forecast** screen shows the next 30 days (rupees or cans) with a likely range, festival periods, what will sell most, what the model learned (calendar guess vs your sales: e.g. Diwali 2.2× guessed, about 1.45× real for interior emulsion), the weekday pattern, a per-product view, and an honest accuracy test.
 
-- **Backtest:** fit only on sales before a cut-off, forecast the next 4 weeks without seeing them, compare with what sold — and with the usual shop method (average of the last 30 days).
-- **Repeated test:** the same over the last 10 two-week and four-week periods. On the sample data the AI forecast's totals are off by about 5–6% on average for two weeks (simple average: about 12%), closer in most periods.
-- A festival the history hasn't seen yet counts at half the calendar's guess until the shop's own sales confirm it.
+**How it learns** (`src/sales_forecast.py`), per product group, from the days the shop has records for:
+- **Weekday pattern** — ridge regression on log(1 + cans) with weekday and festival indicators.
+- **Festival / season effects** — weekday-adjusted cans on the festival's days against plain days, pulled toward the calendar's guess when there are few days. A festival not yet seen counts at half the guess.
+- **Trend** — measured only on plain days, so a season at the end of the history isn't mistaken for growth (and doesn't "keep growing" after it ends); damped and capped.
 
-In demo mode the sample sales, camera history and the sample festival calendar move forward together, so the forecast keeps learning from aligned data.
+**Accuracy, tested on the past** — fit only on sales before a cut-off, forecast what it never saw, compare with what sold and with the usual shop method (average of the last 30 days), over the last 10 two-week periods. The headline is **per product group** (interior, exterior, primer…) because that is what the shop orders by: on sample data built for 10 different dates the AI's error is about half the simple average's (10–16% vs 20–26%). On the shop's total cans the two are close on flat weeks; the screen shows both.
+
+In demo mode the sample data is rebuilt for today when it falls behind (so weekends stay on weekends); the shop's own bills, camera data and settings are kept.
 
 ## Colour Studio: the wall model
 
@@ -146,6 +149,10 @@ The camera answers five questions, each joined with the till and the stock book:
 | **Theft** | A can leaves a shelf while someone stands there, and that person leaves without reaching the counter → *Left with an unpaid can* alert with a photo. Cans taken off shelves are also checked against the day's bills (*shelf vs till*). Plus after-hours movement and customers in the staff-only area. | Theft & safety, Alerts |
 | **Fast movers** | Fastest sellers from the till, plus for watched shelves how often each can is picked up and put back. *Picked up, not bought* and *demand building* are flagged. | Shelves & fast movers |
 | **Shelf stock → pre-order** | Cans counted on each shelf slot from the picture. Low shelf + cans in the store room → *Refill now*. The forecast decides what to order; for watched products the camera's pick-up trend sizes the order up or down. | Shelves & fast movers, Alerts |
+
+**Staff uniform** (Set up tab): switch on *Staff wear a uniform* and pick the colour — or press **Capture from the camera** while a staff member stands in front of it. Anyone wearing it for about a second is tagged *Staff · not counted*: not a visitor, not matched to bills, no store-room alert. A bright colour customers rarely wear works best (orange vs yellow is told apart; a dull or dark colour gets a warning). Each person is also told apart by shirt colour, so the next customer stepping into the same spot isn't mistaken for the one who just left.
+
+**Tested end to end** (`tests/test_e2e_counter.py`): scripted scenes with drawn people go through the real detector, tracker, uniform check, visits and billing — a counter camera (buyer, staff, "just asking", passer-by), a busy counter (a couple shares a bill while a stranger who came later doesn't), and a doorway camera. `tests/browser/run_e2e.py` runs the real app in two browsers with fake cameras (laptop on Store Camera, phone on Scan & Bill); `.github/workflows/e2e.yml` runs it on GitHub.
 
 **Data sources.** Rows are tagged `camera` (a real camera), `demo` (the drawn demo shop) or `sample` (30 days of history built to match the sample sales, so the screens show something on day one). Demo numbers never count as real visitors. `python data/seed_camera.py` adds the sample history to an older database.
 

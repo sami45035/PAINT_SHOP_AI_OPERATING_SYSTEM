@@ -6,7 +6,6 @@ Run:  python -m pytest -q        (or: python -m unittest discover tests)
 import shutil
 import sqlite3
 import tempfile
-import time
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -129,17 +128,21 @@ class TestLayer1Data(unittest.TestCase):
         shutil.copy(DB_PATH, tmp)
         with sqlite3.connect(tmp) as c:
             latest = c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0]
+            c.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
+            c.execute("INSERT OR REPLACE INTO app_settings VALUES ('camera_layout', '{\"uniform\": {\"on\": true}}')")
         future = datetime.strptime(latest, "%Y-%m-%d").date() + timedelta(days=3)
         with mock.patch.object(db, "DB_PATH", tmp), mock.patch.object(db, "DEMO_MODE", True), \
                 mock.patch.object(db.clock, "today", return_value=future):
             self.assertEqual(db.ensure_demo_dates_current(), 3)
+            self.assertEqual(db.get_setting("camera_layout"), {"uniform": {"on": True}})   # the owner's set-up survives
             self.assertEqual(db.ensure_demo_dates_current(), 0)
         with sqlite3.connect(tmp) as c:
             self.assertEqual(c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0], future.isoformat())
             by_day = dict(c.execute("SELECT strftime('%w', sale_timestamp), COUNT(*) FROM sales GROUP BY 1").fetchall())
             self.assertEqual(c.execute("SELECT value FROM app_settings WHERE key='seed_id'").fetchone()[0],
                              db._seed_id(DB_PATH))                     # not mistaken for a new sample
-        self.assertEqual(max(by_day, key=by_day.get), "6")             # Saturday
+        weekdays = [by_day[d] for d in "12345"]
+        self.assertGreater(min(by_day["6"], by_day["0"]), max(weekdays))   # Saturday and Sunday beat every weekday
 
 
 # --------------------------------------------------------------------- Layer 2

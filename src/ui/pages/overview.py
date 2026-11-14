@@ -5,7 +5,7 @@ import streamlit as st
 
 from src import clock
 from src.dashboard_views import render_hourly_traffic_chart, render_sales_trend_chart
-from src.formatting import pack, rupees, rupees_short
+from src.formatting import rupees, rupees_short
 from src.ui import data, nav
 from src.ui.theme import banner, change_html, chip, html, kpi_card, page_header, show_chart, swatch_row  # noqa: F401
 

@@ -7,13 +7,10 @@ Supports:
 Wall finding, recolouring and room-aware suggestions live in src/colour_studio/.
 """
 import json
-import math
 import numpy as np
 import pandas as pd
-from PIL import Image
-from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
-from src.config import DB_PATH, SHADES_CATALOG_PATH, SAMPLE_ROOMS_DIR
+from src.config import DB_PATH, SHADES_CATALOG_PATH
 import re
 import sqlite3
 

@@ -132,6 +132,10 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
                         sid = slot_of.get(p)
                         if sid and size <= 4:
                             shelves.add(sid)
+                            if level[sid] < q and not (sid in NEGLECTED and ago < NEGLECTED[sid]):
+                                # staff top the shelf up from the store room when it runs out (the camera sees it)
+                                ev(entered + timedelta(minutes=stay * 0.3), sid, "restock", CAPACITY - level[sid])
+                                level[sid] = CAPACITY
                             take = min(q, level[sid])
                             if take:
                                 ev(entered + timedelta(minutes=stay * 0.4), sid, "pick", take)

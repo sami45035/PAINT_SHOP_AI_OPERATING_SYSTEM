@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -416,6 +416,9 @@ def preorder(source: str, day: Optional[date] = None) -> Dict[str, Any]:
 
 # ----------------------------------------------------------------------------- 3. theft
 
+PAY_GRACE_MIN = 45          # a picked can is "on its way to the counter" this long
+
+
 def theft(source: str, day: Optional[date] = None, days: int = 7) -> Dict[str, Any]:
     """
     - Walk-outs: someone took a can and left without reaching the counter.
@@ -429,9 +432,10 @@ def theft(source: str, day: Optional[date] = None, days: int = 7) -> Dict[str, A
     sec = _q("SELECT * FROM security_events WHERE COALESCE(source,'sample') = ? AND DATE(timestamp) >= ? "
              "AND timestamp <= ? ORDER BY timestamp DESC;", (source, since, now))
     start = ds + " 00:00:00"
-    # A can picked in the last 20 minutes may still be on its way to the counter: picks in that window
-    # that the till hasn't billed yet (in the same window) are given the benefit of the doubt.
-    grace = (clock.now_naive() - timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+    # A can picked in the last 45 minutes may still be with a customer who hasn't paid yet (paint customers
+    # compare shades and wait for tinting): picks in that window the till hasn't billed yet get the benefit
+    # of the doubt. A can leaving through the door unpaid is alerted at once by the walk-out check anyway.
+    grace = (clock.now_naive() - timedelta(minutes=PAY_GRACE_MIN)).strftime("%Y-%m-%d %H:%M:%S")
     ev = _shelf_events(source, start, now)
     gap = []
     if not ev.empty:

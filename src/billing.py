@@ -427,7 +427,7 @@ def label_sheet(product_ids: Sequence[int], copies: int = 1, fmt: str = "PDF") -
 
 GRACE_BEFORE_S = 30       # a bill saved just before the camera confirmed the person at the counter
 GRACE_AFTER_S = 150       # ... or up to 2.5 minutes after they stepped away (printing, change, packing)
-GROUP_S = 90              # people who came in within 90 s of each other and were at the counter together = one group
+GROUP_S = 30              # people who came in within 30 s of the buyer and stood at the counter with them share the bill
 
 
 def _window(v) -> Tuple[Optional[datetime], Optional[datetime]]:
@@ -470,12 +470,19 @@ def match_visits(source: str = "camera", day: Optional[date] = None) -> Dict[str
                 f, to = _window(v)
                 if f is None:
                     continue
+                came_in = datetime.strptime(v["entered_at"], "%Y-%m-%d %H:%M:%S")
+                if came_in > t + timedelta(seconds=5):
+                    continue                      # walked in after the bill was saved: can't be the buyer
                 if f - timedelta(seconds=GRACE_BEFORE_S) <= t <= to + timedelta(seconds=GRACE_AFTER_S):
                     gap = 0 if f <= t <= to else min(abs((t - f).total_seconds()), abs((t - to).total_seconds()))
                     cands.append((gap, v))
             if not cands:
                 continue
-            cands.sort(key=lambda c: c[0])
+            def leaves_after(v):            # whoever pays usually leaves soon after: the tie-break at a busy counter
+                gone = datetime.strptime(v["left_at"], "%Y-%m-%d %H:%M:%S") if v.get("left_at") else t
+                return abs((gone - t).total_seconds())
+
+            cands.sort(key=lambda c: (c[0], leaves_after(c[1])))
             buyer = cands[0][1]
             entered = datetime.strptime(buyer["entered_at"], "%Y-%m-%d %H:%M:%S")
             group = [buyer] + [v for g, v in cands[1:]
@@ -492,6 +499,8 @@ def match_visits(source: str = "camera", day: Optional[date] = None) -> Dict[str
             for v in visits:
                 if v["bill_no"] or v["no_sale_reason"]:
                     continue
+                if datetime.strptime(v["entered_at"], "%Y-%m-%d %H:%M:%S") > t + timedelta(seconds=5):
+                    continue                      # not in the shop yet
                 f, to = _window(v)
                 if f is None:
                     f = datetime.strptime(v["entered_at"], "%Y-%m-%d %H:%M:%S")

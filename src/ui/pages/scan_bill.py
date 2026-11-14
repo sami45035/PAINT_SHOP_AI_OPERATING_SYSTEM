@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from src import billing, clock
-from src.formatting import pack, rupees
+from src.formatting import rupees
 from src.ui import data, nav
 from src.ui.components import code_scanner
 from src.ui.theme import chip, html, page_header

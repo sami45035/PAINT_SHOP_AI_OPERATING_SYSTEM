@@ -79,7 +79,7 @@
     }
     // people
     (args.boxes || []).forEach(function (b) {
-      var colour = b.zone ? "#F97066" : ((b.label || "").indexOf("Customer") === 0 ? "#4ADE80" : "#C9CED6");
+      var colour = b.kind === "staff" ? "#5AA0DC" : b.zone ? "#F97066" : ((b.label || "").indexOf("Customer") === 0 ? "#4ADE80" : "#C9CED6");
       octx.strokeStyle = colour;
       octx.strokeRect(r.x + b.x * r.w, r.y + b.y * r.h, b.w * r.w, b.h * r.h);
       tag(b.label || "Person", r.x + b.x * r.w, r.y + b.y * r.h - 4, colour);

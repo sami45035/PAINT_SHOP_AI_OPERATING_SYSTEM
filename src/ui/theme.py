@@ -130,7 +130,7 @@ def kpi_card(label: str, value: str, sub_html: str = "", attention: bool = False
 
 def change_html(pct: Optional[float], suffix: str = "vs this time yesterday") -> str:
     if pct is None:
-        return f'<span class="apx-muted">No sales by this time yesterday</span>'
+        return '<span class="apx-muted">No sales by this time yesterday</span>'
     cls, arrow = ("apx-up", "▲") if pct >= 0 else ("apx-down", "▼")
     return f'<span class="{cls}">{arrow} {abs(pct):.0f}% {suffix}</span>'
 

@@ -7,7 +7,7 @@ owner can act on: what's wrong, why it matters, and the one thing to do.
 Levels: "act_now" (red), "soon" (amber), "look_into" (blue).
 """
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import pandas as pd

@@ -283,7 +283,9 @@ def populate_database(conn):
     # in this shop it is nearer 1.8x for emulsions. The sales predictor learns the
     # real effect from these sales.
     from src.predictor import event_applies
-    REAL = [  # (start, end, impact text as in the calendar, shop-wide visitors x, product x)
+    # A season ADDS demand for its own products; everything else sells as usual (the shop gets
+    # extra customers for them — waterproofing season doesn't stop people buying interior paint).
+    REAL = [  # (start, end, impact text as in the calendar, (unused), product x)
         ("2026-10-10", "2026-11-15", "Interior & Exterior Emulsions", 1.30, 1.45),
         ("2026-09-01", "2026-10-15", "Waterproofing & Exterior Primer", 1.10, 2.10),
         ("2026-11-20", "2027-01-15", "Luxury Sheen & Accent Shades", 1.10, 1.30),
@@ -296,6 +298,12 @@ def populate_database(conn):
         w = 0.65 / len(popular_ids) if p["id"] in popular_ids else 0.35 / max(1, len(regular_ids))
         base_w[p["id"]] = w * (0.03 if p["id"] in slow_ids else 1.0)
     by_id = {p["id"]: p for p in products_inserted}
+    base_total = sum(base_w.values())
+    # the "demand building" story, made certain: the last week also has two extra Royale Blue 4 L
+    # buyers a day (one product sells only ~10 bills a week, so a nudge on chance alone can vanish in noise)
+    RISING_DAYS = 7
+    rising_pid = next((p["id"] for p in products_inserted
+                       if p["shade_name"] == "Royale Blue" and float(p["pack_size"]) == 4.0), None)
     day_cache = {}
 
     def day_weights(d):
@@ -309,7 +317,7 @@ def populate_database(conn):
                 for imp, pm in active:
                     if event_applies(pr["category"], pr["finish"], imp):
                         m = max(m, pm) if pm >= 1 else min(m, pm)
-                if "Royale Blue" in pr["shade_name"] and (today.date() - d).days < 10:
+                if "Royale Blue" in pr["shade_name"] and (today.date() - d).days < RISING_DAYS:
                     m *= 2.0          # Royale Blue is suddenly in demand (a viral home-makeover reel)
                 ws.append(base_w[pid] * m)
             day_cache[d] = (ids, ws)
@@ -319,10 +327,8 @@ def populate_database(conn):
     while cur_date <= today:
         date_str = cur_date.strftime("%Y-%m-%d")
         is_weekend = cur_date.weekday() >= 5
-        season_mult = 1.0
-        for a, b, imp, v, pm in REAL:
-            if a <= cur_date.date() <= b:
-                season_mult *= v
+        _, day_ws = day_weights(cur_date.date())
+        season_mult = sum(day_ws) / base_total        # more customers exactly in proportion to the extra demand
 
         for hour in range(9, 21):
             is_peak = (11 <= hour <= 13) or (17 <= hour <= 20)
@@ -344,9 +350,10 @@ def populate_database(conn):
             VALUES (?, ?, ?, ?, ?);
             """, (f"{date_str} {hour:02d}:00:00", visitors, count_out, occupancy, dwell))
 
-            for _ in range(bills):
+            extra = 1 if (rising_pid and (today.date() - cur_date.date()).days < RISING_DAYS and hour in (11, 18)) else 0
+            for k in range(bills + extra):
                 ids, ws = day_weights(cur_date.date())
-                prod_id = random.choices(ids, weights=ws, k=1)[0]
+                prod_id = rising_pid if k >= bills else random.choices(ids, weights=ws, k=1)[0]
                 p_info = next(p for p in products_inserted if p["id"] == prod_id)
                 c_type = random.choice(customer_types)
                 # Contractors buy higher volume (2 to 6 cans)

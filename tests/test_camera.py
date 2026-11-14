@@ -389,7 +389,7 @@ class TestInsights(unittest.TestCase):
             th = si.theft("sample")
         self.assertEqual(th["walkouts_today"], 1)
         self.assertIn("Royale Blue 4 L", [g["label"] for g in th["shelf_vs_till"]])
-        with Frozen(10, 40):                       # 3 minutes after the walk-out: still in the 20-minute grace
+        with Frozen(10, 40):                       # 3 minutes after the walk-out: still in the 45-minute grace
             th = si.theft("sample")
         self.assertEqual(th["shelf_vs_till"], [])
 

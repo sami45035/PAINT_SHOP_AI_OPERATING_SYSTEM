@@ -1,18 +1,19 @@
 """
 AI sales predictor (Layer 3): learns from the shop's own sales history.
 
-For each product group (interior emulsion, exterior emulsion, primer, ...)
-a regression is fitted on the daily cans sold over the last six months:
+For each product group (interior emulsion, exterior emulsion, primer, ...),
+from the daily cans sold over the last six months (only days the shop has
+records for):
 
-    log(1 + cans on day t) = level + weekday effect + festival effects + trend + noise
-
-From that it learns, in the shop's own data:
-- the weekday pattern (Saturday vs Tuesday)
+- the weekday pattern (Saturday vs Tuesday): ridge regression on
+  log(1 + cans) with weekday and festival indicators
 - how much each festival / season in the calendar REALLY moves sales for that
-  group (the calendar's multiplier is only a starting guess; ridge
-  regularisation pulls the learned effect toward it when evidence is thin, and a
-  festival not yet seen in the history counts at half the guess)
-- the recent trend (damped and capped, so it can't run away)
+  group: average weekday-adjusted cans on its days against plain days, pulled
+  toward the calendar's guess when there are only a few days (the guess weighs
+  like a week of evidence); a festival not yet seen in the history counts at
+  half the guess
+- the long-run trend, measured only on plain days (so a season at the end of
+  the history isn't mistaken for growth), damped and capped
 
 A forecast day is then: recent level × weekday factor × festival factor ×
 damped trend. Each group's forecast is split across its products by their
@@ -29,7 +30,7 @@ import math
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -46,6 +47,7 @@ TREND_DAMP = 0.5
 TREND_CAP = 0.15           # at most ±15% over the forecast horizon
 RIDGE = 2.0
 UNPROVEN_STRENGTH = 0.5    # a festival the history hasn't seen yet counts at half the calendar's guess
+EFFECT_PRIOR_DAYS = 7      # the calendar's guess weighs like a week of evidence
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -102,7 +104,11 @@ class Forecaster:
         sales, products, cal = data["sales"], data["products"], data["calendar"]
         sales = sales[sales["day"] < cutoff]
         self = cls(cutoff=cutoff, products=products)
-        days = [cutoff - timedelta(days=i) for i in range(TRAIN_DAYS, 0, -1)]
+        # learn only from days the shop has records for: before its first sale is "unknown", not "sold nothing"
+        # (zeros there would look like strong growth and distort the season effects)
+        first = min(sales["day"]) if not sales.empty else cutoff - timedelta(days=1)
+        span = max(14, min(TRAIN_DAYS, (cutoff - first).days))
+        days = [cutoff - timedelta(days=i) for i in range(span, 0, -1)]
         prod_group = dict(zip(products["product_id"], products["category"].map(group_of)))
         sales = sales.assign(group=sales["product_id"].map(prod_group))
         for g, gp in products.groupby(products["category"].map(group_of)):
@@ -176,7 +182,7 @@ def _event_factor(m: GroupModel, d: date) -> float:
 
 
 def _fit_group(g: str, days: List[date], y: np.ndarray, events: List[Dict[str, Any]]) -> GroupModel:
-    """Ridge regression on log(1 + cans): weekday dummies, festival indicators, trend."""
+    """Ridge regression on log(1 + cans): weekday dummies and festival indicators; then the trend on plain days."""
     n = len(days)
     t = np.arange(n) / max(1, n - 1)
     cols, names = [np.ones(n)], ["intercept"]
@@ -190,8 +196,6 @@ def _fit_group(g: str, days: List[date], y: np.ndarray, events: List[Dict[str, A
             cols.append(a)
             names.append(e["name"])
             usable.append(e)
-    cols.append(t - t.mean())
-    names.append("trend")
     X = np.column_stack(cols)
     z = np.log1p(y)
     # ridge toward priors: weekday 0, trend 0, festival = the calendar's multiplier (in log(1 + cans) terms)
@@ -221,18 +225,34 @@ def _fit_group(g: str, days: List[date], y: np.ndarray, events: List[Dict[str, A
         dow[k] = cans(r) / base
     dow = dow / dow.mean()
     ev_eff = {}
+    # Festival effects on cans, measured directly: average weekday-adjusted cans on the festival's days
+    # against plain days (no festival running), pulled toward the calendar's guess when there are few days.
+    # (The log regression above gives the weekday pattern; read off it, a festival's effect on a small
+    # group — a few cans a day, some days none — comes out too big.)
+    adj = np.array([v / dow[d.weekday()] for d, v in zip(days, y)])
+    plain = np.array([not any(e2["start"] <= d <= e2["end"] for e2 in events) for d in days])
+    plain_mean = float(adj[plain].mean()) if plain.sum() >= 14 else float(adj.mean())
     for e in events:
         if e in usable:
-            i = names.index(e["name"])
-            r = base_row.copy()
-            r[i] = 1.0
-            ev_eff[e["name"]] = float(min(3.0, max(0.2, cans(r) / base)))
+            on = np.array([e["start"] <= d <= e["end"] for d in days])
+            n_on = int(on.sum())
+            raw = float(adj[on].mean()) / max(plain_mean, 1e-6)
+            w = n_on / (n_on + EFFECT_PRIOR_DAYS)
+            eff = math.exp(w * math.log(max(raw, 1e-3)) + (1 - w) * math.log(e["prior"]))
+            ev_eff[e["name"]] = float(min(3.0, max(0.2, eff)))
         else:
             # Not in the history yet: the calendar's number is only a guess, so it counts at half strength
             # (2.2x becomes about 1.5x) until the shop's own sales confirm it.
             ev_eff[e["name"]] = float(math.exp(UNPROVEN_STRENGTH * math.log(e["prior"])))
-    # trend: slope of log level per day, damped
-    slope = beta[names.index("trend")] / max(1, n - 1)
+    # Trend, measured separately and only on days with no festival or season running: when a season
+    # sits at the end of the history, "season on" and "growing" look alike in one regression, and the
+    # trend would swallow the season (then keep "growing" after the season ends).
+    plain_days = np.array([not any(e["start"] <= d <= e["end"] for e in events) for d in days])
+    resid = z - X @ beta
+    slope = 0.0
+    if plain_days.sum() >= 42:
+        tt = np.arange(n, dtype=float)[plain_days]
+        slope = float(np.polyfit(tt, resid[plain_days], 1)[0])       # log cans per day
     trend = TREND_DAMP * slope
     seen = {e["name"]: int(sum(1 for d in days if e["start"] <= d <= e["end"])) for e in events}
     m = GroupModel(g, events, dow, ev_eff, trend, 0.0, n, seen)
@@ -345,6 +365,7 @@ def rolling_backtest(horizon: int = 14, windows: int = 10, until: Optional[date]
         "ai_group_err_pct": float(df["ai_group_err_pct"].mean()),
         "simple_group_err_pct": float(df["simple_group_err_pct"].mean()),
         "ai_wins": int((df["ai_err_pct"] < df["simple_err_pct"]).sum()), "windows": len(df),
+        "ai_group_wins": int((df["ai_group_err_pct"] < df["simple_group_err_pct"]).sum()),
     }
 
 

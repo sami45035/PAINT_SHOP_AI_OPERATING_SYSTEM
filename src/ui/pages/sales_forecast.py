@@ -58,8 +58,9 @@ def render() -> None:
         else:
             kpi_card("Festival now", "None", "normal weeks ahead")
     with c4:
-        kpi_card("Forecast accuracy", f"±{rb14['ai_err_pct']:.0f}%",
-                 f"on 2-week totals, tested on {rb14['windows']} past periods · simple average ±{rb14['simple_err_pct']:.0f}%")
+        kpi_card("Forecast accuracy", f"±{rb14['ai_group_err_pct']:.0f}%",
+                 f"per product group, 2 weeks ahead, tested on {rb14['windows']} past periods · "
+                 f"simple average ±{rb14['simple_group_err_pct']:.0f}%")
 
     st.write("")
     with st.container(border=True):
@@ -133,13 +134,16 @@ def render() -> None:
                  f'AI forecast: {rupees(bt["total_predicted"])} — <b>{verdict(bt["total_error_pct"])}</b><br>'
                  f'Simple average: {rupees(bt["total_simple"])} — <b>{verdict(bt["total_error_simple_pct"])}</b></div>')
             html(f'<div class="apx-muted" style="margin-top:10px;line-height:1.6">Repeated over {rb14["windows"]} past '
-                 f'2-week periods: AI off by <b>{rb14["ai_err_pct"]:.1f}%</b> on average, simple average '
-                 f'<b>{rb14["simple_err_pct"]:.1f}%</b>; the AI was closer in <b>{rb14["ai_wins"]} of {rb14["windows"]}</b>. '
-                 f'Over 4-week periods: {rb28["ai_err_pct"]:.1f}% vs {rb28["simple_err_pct"]:.1f}% '
-                 f'({rb28["ai_wins"]} of {rb28["windows"]}). Per product group: {rb14["ai_group_err_pct"]:.0f}% vs '
-                 f'{rb14["simple_group_err_pct"]:.0f}%.</div>')
+                 f'2-week periods, <b>per product group</b> (what you order by — interior, exterior, primer…): '
+                 f'AI off by <b>{rb14["ai_group_err_pct"]:.0f}%</b>, simple average <b>{rb14["simple_group_err_pct"]:.0f}%</b>; '
+                 f'the AI was closer in <b>{rb14["ai_group_wins"]} of {rb14["windows"]}</b>. '
+                 f'On the shop\'s total cans: {rb14["ai_err_pct"]:.1f}% vs {rb14["simple_err_pct"]:.1f}% '
+                 f'(closer in {rb14["ai_wins"]} of {rb14["windows"]}) — a flat average can get the total right while '
+                 f'ordering the wrong mix, which is why the group figure matters. 4-week periods, per group: '
+                 f'{rb28["ai_group_err_pct"]:.0f}% vs {rb28["simple_group_err_pct"]:.0f}%.</div>')
         with st.expander("Each 2-week test"):
             show_chart(fch.rolling_errors_chart(rb14["periods"]), key="fc_roll")
+            st.caption("Off by, per product group: how many cans were forecast in the wrong group or missed, as a share of what sold.")
 
     with st.container(border=True):
         _title("One product")

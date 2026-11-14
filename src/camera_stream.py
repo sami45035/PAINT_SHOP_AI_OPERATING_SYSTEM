@@ -83,8 +83,87 @@ def _tag(frame: np.ndarray, text: str, x: int, y: int, colour) -> None:
     cv2.rectangle(frame, (x, y - th - 6), (x + tw + 8, y + 3), DARK, -1)
     cv2.putText(frame, text, (x + 4, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)     # a customer the camera lost and never saw leaving is closed after 10 minutes
 
+UNIFORM_MATCH = 0.30      # this share of the shirt in the uniform colour = wearing it (in that frame)
+
+
+def drop_nested(boxes, weights, cover: float = 0.6):
+    """
+    One person, one box. The people detector often adds a second box at another
+    size around the same person; overlap-based clean-up misses it because one sits
+    inside the other. Keep the stronger box when a weaker one lies mostly inside it.
+    """
+    order = sorted(range(len(boxes)), key=lambda i: -weights[i])
+    out = []
+    for i in order:
+        x, y, w, h = boxes[i]
+        dup = False
+        for (ox, oy, ow, oh) in out:
+            iw = max(0, min(x + w, ox + ow) - max(x, ox))
+            ih = max(0, min(y + h, oy + oh) - max(y, oy))
+            if iw * ih >= cover * min(w * h, ow * oh):
+                dup = True
+                break
+        if not dup:
+            out.append(boxes[i])
+    return out
+
+
+def shirt_colour(frame: np.ndarray, box, kind: str) -> Optional[np.ndarray]:
+    """Average shirt colour (Lab) of one person, or None if the shirt isn't in the picture."""
+    h, w = frame.shape[:2]
+    r = shirt_region(box, kind, w, h)
+    if r is None:
+        return None
+    x1, y1, x2, y2 = r
+    return cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32).mean(axis=0)
+
+
+LOOK_SAME = 45.0          # shirt colour distance (Lab) still "the same person" while in view ...
+LOOK_SAME_AFTER_GAP = 30.0   # ... and stricter after being out of sight a moment (someone new at the same spot?)
+
+
+def hex_to_bgr(hex_code: str) -> Tuple[int, int, int]:
+    h = hex_code.lstrip("#")
+    return int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16)
+
+
+def shirt_region(box: Tuple[int, int, int, int], kind: str, w: int, h: int) -> Optional[Tuple[int, int, int, int]]:
+    """Where the shirt is: the chest of a body box, or just below a face."""
+    x, y, bw, bh = box
+    if kind == "face":
+        x1, x2 = x - 0.2 * bw, x + 1.2 * bw
+        y1, y2 = y + 1.35 * bh, y + 2.6 * bh
+    else:                                         # HOG boxes have a margin round the person
+        x1, x2 = x + 0.33 * bw, x + 0.67 * bw
+        y1, y2 = y + 0.25 * bh, y + 0.47 * bh
+    x1, y1, x2, y2 = int(max(0, x1)), int(max(0, y1)), int(min(w, x2)), int(min(h, y2))
+    if x2 - x1 < 6 or y2 - y1 < 6:
+        return None                               # shirt out of the picture
+    return x1, y1, x2, y2
+
+
+def uniform_share(frame: np.ndarray, region: Tuple[int, int, int, int], uniform_bgr: Tuple[int, int, int]) -> float:
+    """Share of the shirt's pixels in the uniform colour (hue for coloured uniforms, Lab distance for white/black/grey)."""
+    x1, y1, x2, y2 = region
+    patch = frame[y1:y2, x1:x2]
+    ref = np.uint8([[uniform_bgr]])
+    rh, rs, rv = cv2.cvtColor(ref, cv2.COLOR_BGR2HSV)[0, 0].astype(int)
+    if rs >= 60 and rv >= 50:                     # a coloured uniform: match the hue, tolerant to light
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV).astype(int)
+        dh = np.abs(hsv[..., 0] - rh)
+        dh = np.minimum(dh, 180 - dh)
+        # hue within 7 (orange vs yellow/mustard are 8-10 apart), and not much duller or darker than the uniform
+        ok = (dh <= 7) & (hsv[..., 1] >= max(60, int(0.65 * rs))) & (hsv[..., 2] >= max(45, int(0.55 * rv)))
+    else:                                         # white / black / grey: colour distance
+        lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB).astype(int)
+        rl = cv2.cvtColor(ref, cv2.COLOR_BGR2LAB)[0, 0].astype(int)
+        ok = np.sqrt(((lab - rl) ** 2).sum(axis=2)) <= 28
+    return float(ok.mean()) if ok.size else 0.0
+
+
 # Colours (BGR) for overlays
 YELLOW, RED, GREEN, WHITE, DARK = (74, 192, 245), (102, 112, 249), (128, 222, 74), (255, 255, 255), (43, 32, 21)
+STAFF_COL = (220, 160, 90)     # staff boxes
 
 
 def _reachable(url: str, timeout: float = 2.0) -> bool:
@@ -115,6 +194,15 @@ class Track:
     history: List[float] = field(default_factory=list)
     out_x: Optional[float] = None     # where the feet were when last seen beyond the door line
     first_seen: float = 0.0
+    looks: int = 0                    # frames where the shirt could be checked against the uniform
+    uniform_hits: int = 0             # ... and matched it
+    staff: bool = False               # decided: wears the shop uniform -> not a visitor
+    look: Optional[Any] = None        # average shirt colour (Lab): tells two people at the same spot apart
+    height: float = 0.0               # smoothed box height (one half-body box doesn't change who this is)
+
+    @property
+    def looks_like_staff(self) -> bool:
+        return self.looks >= 3 and self.uniform_hits >= 0.6 * self.looks
 
 
 class StoreVisionEngine:
@@ -153,6 +241,8 @@ class StoreVisionEngine:
         self.total_entered = 0
         self.total_exited = 0
         self.current_occupancy = 0
+        self.staff_ids: set = set()                     # tracks recognised by the uniform (not counted)
+        self._det_kinds: List[str] = []
 
         self.tracks: Dict[int, Track] = {}
         self.next_track_id = 1
@@ -213,6 +303,56 @@ class StoreVisionEngine:
     @property
     def count_mode(self) -> str:
         return self.layout.get("count_mode") or ("presence" if self.source_type == "webcam" else "door")
+
+    @property
+    def uniform(self) -> Optional[Tuple[int, int, int]]:
+        """The staff uniform colour (BGR), if staff are to be recognised."""
+        u = self.layout.get("uniform") or {}
+        if not u.get("on") or not u.get("hex"):
+            return None
+        try:
+            return hex_to_bgr(u["hex"])
+        except (ValueError, TypeError):
+            return None
+
+    def capture_uniform(self) -> Optional[str]:
+        """Shirt colour of the person nearest the camera (a staff member standing in front of it), as #rrggbb."""
+        frame = self.latest_raw
+        if frame is None:
+            return None
+        h, w = frame.shape[:2]
+        bodies = self.detect_people(frame)
+        cands = [(b, "body") for b in bodies] + [(f, "face") for f in self.detect_faces(frame, bodies)]
+        cands = [(shirt_region(b, k, w, h), b) for b, k in cands]
+        cands = [(r, b) for r, b in cands if r is not None]
+        if not cands:
+            return None
+        r, _ = max(cands, key=lambda c: (c[0][2] - c[0][0]) * (c[0][3] - c[0][1]))
+        x1, y1, x2, y2 = r
+        b, g, rr = np.median(frame[y1:y2, x1:x2].reshape(-1, 3), axis=0).astype(int)
+        return f"#{rr:02x}{g:02x}{b:02x}"
+
+    def _check_uniform(self, frame: np.ndarray, tr: "Track", box, kind: str) -> None:
+        uni = self.uniform
+        if uni is None or tr.staff:
+            return
+        h, w = frame.shape[:2]
+        region = shirt_region(box, kind, w, h)
+        if region is None:
+            return
+        tr.looks += 1
+        if uniform_share(frame, region, uni) >= UNIFORM_MATCH:
+            tr.uniform_hits += 1
+
+    def _decide_staff(self, tr: "Track") -> bool:
+        """Before counting someone: are they staff? (Needs a few looks at the shirt.)"""
+        if self.uniform is not None and (tr.staff or tr.looks_like_staff):
+            if not tr.staff:
+                tr.staff = True
+                self.staff_ids.add(tr.id)
+                self._event("staff", "Staff member recognised by the uniform — not counted")
+            return True
+        return False
 
     def set_layout(self, layout: Dict[str, Any]) -> None:
         self.layout = layout
@@ -353,7 +493,8 @@ class StoreVisionEngine:
         weights = np.asarray(weights).ravel().tolist()
         keep = cv2.dnn.NMSBoxes([list(map(int, b)) for b in boxes], weights, 0.5, 0.45)
         keep = np.asarray(keep).ravel().tolist() if len(keep) else []
-        return [tuple(int(v / scale) for v in boxes[i]) for i in keep]
+        kept = drop_nested([tuple(int(v) for v in boxes[i]) for i in keep], [weights[i] for i in keep])
+        return [tuple(int(v / scale) for v in b) for b in kept]
 
     def detect_faces(self, frame: np.ndarray, bodies) -> List[Tuple[int, int, int, int]]:
         """Faces not already inside a body box: people close to the camera."""
@@ -382,7 +523,8 @@ class StoreVisionEngine:
             out.append((int(x), int(y), int(fw), int(fh)))
         return out
 
-    def _update_tracks(self, detections, line_y: int, now_s: float, frame_h: int = 480) -> Tuple[int, int]:
+    def _update_tracks(self, detections, line_y: int, now_s: float, frame_h: int = 480,
+                       frame: Optional[np.ndarray] = None, kinds: Optional[List[str]] = None) -> Tuple[int, int]:
         """
         Match detections to tracks and count door-line crossings. A person is
         counted only after being seen clearly on one side and then clearly on
@@ -397,29 +539,53 @@ class StoreVisionEngine:
         if self._frame_w:
             x_lo = (door.get("x1", 0.0) - 0.03) * self._frame_w
             x_hi = (door.get("x2", 1.0) + 0.03) * self._frame_w
-        unmatched = set(self.tracks)
-        for (x, y, bw, bh) in detections:
+        kinds = kinds or ["body"] * len(detections)
+        # Match people to tracks closest pair first (not detection by detection), and never
+        # to a track of a very different size: a track must not jump to someone else.
+        cents = [(x + bw / 2.0, y + bh * 0.9) for (x, y, bw, bh) in detections]
+        looks = [shirt_colour(frame, b, k) if frame is not None else None for b, k in zip(detections, kinds)]
+        pairs = []
+        for di, ((x, y, bw, bh), c) in enumerate(zip(detections, cents)):
+            for tid, tr in self.tracks.items():
+                ratio = bh / max(1.0, tr.height or tr.box[3])
+                if not 0.45 <= ratio <= 1.8:
+                    continue
+                if looks[di] is not None and tr.look is not None:
+                    limit = LOOK_SAME_AFTER_GAP if now_s - tr.last_seen > 1.0 else LOOK_SAME
+                    if float(np.linalg.norm(looks[di] - tr.look)) > limit:
+                        continue                         # a different shirt: a different person
+                d = math.dist(c, tr.centroid)
+                if d < max(80.0, 0.6 * bh):
+                    pairs.append((d, di, tid))
+        assigned, used = {}, set()
+        for d, di, tid in sorted(pairs):
+            if di not in assigned and tid not in used:
+                assigned[di] = tid
+                used.add(tid)
+        for di, ((x, y, bw, bh), kind) in enumerate(zip(detections, kinds)):
             feet_visible = y + bh < frame_h - 3            # a box cut off by the frame bottom can't tell
-            c = (x + bw / 2.0, y + bh * 0.9)
-            best, best_d = None, max(80.0, 0.6 * bh)
-            for tid in unmatched:
-                d = math.dist(c, self.tracks[tid].centroid)
-                if d < best_d:
-                    best, best_d = tid, d
+            c = cents[di]
+            best = assigned.get(di)
             if best is None:
                 tr = Track(self.next_track_id, c, (x, y, bw, bh), now_s, history=[c[1]], first_seen=now_s)
                 self.tracks[tr.id] = tr
                 self.next_track_id += 1
             else:
-                unmatched.discard(best)
                 tr = self.tracks[best]
                 tr.centroid, tr.box, tr.last_seen = c, (x, y, bw, bh), now_s
                 tr.frames += 1
                 tr.history = (tr.history + [c[1]])[-20:]
+            tr.height = float(bh) if not tr.height else 0.7 * tr.height + 0.3 * bh
+            if looks[di] is not None:
+                tr.look = looks[di] if tr.look is None else 0.7 * tr.look + 0.3 * looks[di]
             self._det_tracks.append(tr.id)
+            if frame is not None:
+                self._check_uniform(frame, tr, (x, y, bw, bh), kind)
             if self.count_mode == "presence":
                 # a person who stays in view a moment is a visitor; feet and door line don't matter
                 if (not tr.counted_in or tr.counted_out) and tr.frames >= 2 and now_s - tr.first_seen >= PRESENCE_CONFIRM_S:
+                    if self._decide_staff(tr):
+                        continue
                     entered += 1
                     tr.counted_in, tr.counted_out = True, False
                     self._crossed.append((tr, "in"))
@@ -434,6 +600,9 @@ class StoreVisionEngine:
             at_door = (lambda xx: xx is None or x_lo is None or x_lo <= xx <= x_hi)
             if side == "out":
                 tr.out_x = c[0]
+            if (tr.staff or tr.looks_like_staff) and self._decide_staff(tr):
+                tr.side = side
+                continue
             if tr.side == "out" and side == "in" and tr.frames >= 2 and (not tr.counted_in or tr.counted_out) \
                     and at_door(tr.out_x):
                 # a new entry — also when someone appears at the doorway right where a leaver vanished
@@ -460,6 +629,10 @@ class StoreVisionEngine:
                     self.lost.append((j, now_s))           # may be the same person seen again at the door
             del self.tracks[tid]
         return entered, exited
+
+    def _is_staff_box(self, tid: Optional[int]) -> bool:
+        tr = self.tracks.get(tid) if tid is not None else None
+        return bool(tr and tr.staff)
 
     # ---------------------------------------------------------------- journeys
     def _finish_visit(self, j: Journey, now: datetime, frame: Optional[np.ndarray], seen_leaving: bool = True) -> None:
@@ -523,6 +696,8 @@ class StoreVisionEngine:
         at_counter, in_staff = 0, []
         presence = self.count_mode == "presence"
         for box, tid in zip(people, self._det_tracks):
+            if self._is_staff_box(tid):
+                continue                                   # staff: not a customer at the counter or in the store room
             ft = feet(box)
             j = self.journeys.get(tid)
             tr = self.tracks.get(tid)
@@ -650,9 +825,11 @@ class StoreVisionEngine:
 
         people = self.detect_people(frame)
         faces = self.detect_faces(frame, people)
+        kinds = ["body"] * len(people)
         if self.count_mode == "presence":
+            kinds += ["face"] * len(faces)
             people, faces = people + faces, []      # a face is a person too (webcams rarely see whole bodies)
-        entered, exited = self._update_tracks(people, line_y, now_s, h)
+        entered, exited = self._update_tracks(people, line_y, now_s, h, frame=raw, kinds=kinds)
         if entered or exited:
             self.total_entered += entered
             self.total_exited += exited
@@ -666,7 +843,9 @@ class StoreVisionEngine:
         alert = None
         motion = self._motion_fraction(frame) if self.source_type != "demo" else 0.0
         warming_up = self.frames_seen < 15  # background model needs a few frames
-        if after_hours and not warming_up and (motion > 0.015 or people or faces):
+        customers_seen = [b for b, t in zip(people, self._det_tracks) if not self._is_staff_box(t)]
+        if after_hours and not warming_up and (motion > 0.015 or customers_seen or faces) and \
+                not (people and not customers_seen and not faces):          # only staff in view: closing up
             alert = self._maybe_alert(
                 "AFTER_HOURS_MOTION", "Main store area",
                 f"Movement at {clock.fmt_time(now)} while the shop is closed.", raw, now) or alert
@@ -705,7 +884,9 @@ class StoreVisionEngine:
         for (x, y, bw, bh), tid in zip(people, self._det_tracks):
             j = self.journeys.get(tid)
             tr = self.tracks.get(tid)
-            if j is None:
+            if tr is not None and tr.staff:
+                colour, tag = STAFF_COL, "Staff · not counted"
+            elif j is None:
                 colour, tag = (190, 190, 190), ("Person · checking…" if presence else "Person")
             elif j.net_picked and not j.reached_counter:
                 colour, tag = RED, f"Customer · {j.net_picked} can{'s' if j.net_picked != 1 else ''}"
@@ -740,6 +921,8 @@ class StoreVisionEngine:
             "inside_now": len(self.journeys),
             "count_mode": self.count_mode,
             "at_counter": at_counter,
+            "staff_seen": len(self.staff_ids),
+            "staff_in_view": sum(1 for t in self._det_tracks if self._is_staff_box(t)),
             "shelves": counts,
             "events": list(self.events[:12]),
             "is_after_hours": after_hours,
@@ -747,8 +930,9 @@ class StoreVisionEngine:
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
             # Boxes as fractions of the frame, for drawing over a live browser video
             "boxes": [{"x": x / w, "y": y / h, "w": bw / w, "h": bh / h, "label": t,
-                       "zone": any(b == (x, y, bw, bh) for b in in_staff), "kind": "person"}
-                      for (x, y, bw, bh), t in zip(people, box_tags)]
+                       "zone": any(b == (x, y, bw, bh) for b in in_staff),
+                       "kind": "staff" if self._is_staff_box(tid) else "person"}
+                      for (x, y, bw, bh), t, tid in zip(people, box_tags, self._det_tracks)]
                      + [{"x": x / w, "y": y / h, "w": fw / w, "h": fh / h, "zone": False, "kind": "face"}
                         for (x, y, fw, fh) in faces],
         }

@@ -75,14 +75,14 @@ def backtest_weeks_chart(bt: Dict) -> go.Figure:
 
 
 def rolling_errors_chart(periods: pd.DataFrame) -> go.Figure:
-    """How far off each 2-week forecast was, AI vs simple average."""
+    """How far off each 2-week forecast was per product group, AI vs simple average."""
     if periods.empty:
         return _empty("Not enough history")
     labels = [f"{r['from']:%d %b}" for _, r in periods.iterrows()]
     fig = go.Figure()
-    fig.add_bar(x=labels, y=periods["ai_err_pct"], name="AI forecast", marker_color=PRIMARY, marker_line_width=0,
+    fig.add_bar(x=labels, y=periods["ai_group_err_pct"], name="AI forecast", marker_color=PRIMARY, marker_line_width=0,
                 hovertemplate="2 weeks from %{x}<br>off by %{y:.1f}%<extra>AI</extra>")
-    fig.add_bar(x=labels, y=periods["simple_err_pct"], name="Simple 30-day average", marker_color=SECONDARY,
+    fig.add_bar(x=labels, y=periods["simple_group_err_pct"], name="Simple 30-day average", marker_color=SECONDARY,
                 marker_line_width=0, hovertemplate="2 weeks from %{x}<br>off by %{y:.1f}%<extra>Simple</extra>")
     fig.update_layout(barmode="group", bargroupgap=0.06)
     fig.update_yaxes(ticksuffix="%", rangemode="tozero")

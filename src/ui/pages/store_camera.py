@@ -11,9 +11,9 @@ Set up          place the door line, counter, staff-only area and shelf slots; c
 import copy
 from datetime import datetime
 from html import escape
-from typing import Optional
 
 import cv2
+import numpy as np
 import streamlit as st
 from PIL import Image
 
@@ -37,7 +37,7 @@ EVENT_WORDS = {
 STATUS_CHIP = {"NEW": ("act_now", "New"), "SEEN": ("neutral", "Checked"), "VERIFIED": ("neutral", "Checked"),
                "RESOLVED": ("healthy", "Resolved"), "FALSE_ALARM": ("healthy", "False alarm")}
 DATA_SOURCES = {"camera": "This camera", "demo": "Demo shop", "sample": "Sample history (30 days)"}
-EVENT_CHIP = {"door": ("info", "Door"), "pick": ("soon", "Picked"), "put_back": ("neutral", "Put back"),
+EVENT_CHIP = {"staff": ("neutral", "Staff"), "door": ("info", "Door"), "pick": ("soon", "Picked"), "put_back": ("neutral", "Put back"),
               "restock": ("healthy", "Refill"), "counter": ("info", "Counter"), "visit": ("neutral", "Visit"),
               "alert": ("act_now", "Alert")}
 
@@ -92,11 +92,15 @@ def _right_now(eng: StoreVisionEngine, metrics: dict) -> None:
         with c1:
             kpi_card("Came in today", str(counts["in"]), "people seen")
         with c2:
-            kpi_card("In view now", str(metrics.get("current_people", 0)), "at the counter")
+            staff_now = int(metrics.get("staff_in_view", 0))
+            kpi_card("In view now", str(max(0, metrics.get("current_people", 0) - staff_now)),
+                     f"customers · {staff_now} staff" if staff_now else "at the counter")
         with c3:
             kpi_card("Left today", str(counts["out"]), "visits finished")
         st.caption("Counting **people in view**: someone who stays in view for about 1.5 s counts as a visitor; "
                    "out of view for about 4 s counts as left. Change it in **Set up**.")
+    if eng.uniform is not None:
+        st.caption(f"Staff in uniform aren't counted — {metrics.get('staff_seen', 0)} recognised since the camera started.")
     else:
         with c1:
             kpi_card("Came in today", str(counts["in"]), "door line")
@@ -392,7 +396,7 @@ def _shelves_tab(src: str, day: str) -> None:
                     html(f'<div class="apx-row" style="align-items:flex-start">{chip(r["level"])}<span class="apx-row-main">'
                          f'{escape(r["message"])}</span></div>')
                 with c2:
-                    if r["move"] and st.button(f"Refilled", key=f"cam_refill_{i}", use_container_width=True,
+                    if r["move"] and st.button("Refilled", key=f"cam_refill_{i}", use_container_width=True,
                                                help=f"Records {r['move']} cans moved to {r['slot_name']}"):
                         db.log_shelf_event(src, r["slot_id"], int(r["product_id"]) if r["product_id"] else None,
                                            "restock", int(r["move"]))
@@ -505,7 +509,7 @@ def _theft_tab(src: str, day: str) -> None:
                    "Cans that left the watched shelves (not put back) compared with what the till billed")
             if not th["shelf_vs_till"]:
                 html(f'{chip("healthy", "Matches")} <span class="apx-muted">Every can that left a watched shelf today '
-                     "has a bill (cans picked in the last 20 minutes are left out — they may still be on the way to the counter).</span>")
+                     "has a bill (cans picked in the last 45 minutes are left out — the customer may not have paid yet).</span>")
             for g in th["shelf_vs_till"]:
                 missing_chip = chip("soon", str(g["missing"]) + " missing")
                 html(f'<div class="apx-row">{missing_chip}<span class="apx-row-main"><b>{escape(g["label"])}</b>'
@@ -537,6 +541,57 @@ def _product_choices():
     return {int(r.id): f"{r.shade_name} {r.pack_size_litres:g} L · {r.brand}" for r in df.itertuples(index=False)}
 
 
+def _uniform_setup(eng: StoreVisionEngine) -> None:
+    """Staff wear the shop uniform -> the camera doesn't count them as customers."""
+    with st.container(border=True):
+        _title("Staff uniform — don't count staff as customers")
+        u = dict(eng.layout.get("uniform") or {})
+        on = st.toggle("Staff wear a uniform (shirt / T-shirt / apron in one colour)", value=bool(u.get("on")),
+                       key="cam_uni_on")
+        colour = u.get("hex") or "#1E78C8"
+        if on:
+            c1, c2 = st.columns([1, 2], vertical_alignment="bottom")
+            with c1:
+                colour = st.color_picker("Uniform colour", colour, key=f"cam_uni_hex_{colour}")
+            with c2:
+                if st.button("Capture from the camera", key="cam_uni_capture", use_container_width=True,
+                             help="Ask a staff member in uniform to stand facing the camera, then press this"):
+                    got = eng.capture_uniform()
+                    if got:
+                        colour = got
+                        st.toast(f"Uniform colour captured: {got}")
+                    else:
+                        st.warning("No one found in the picture — start the camera on the Live tab and stand in front of it.")
+            hsv = cv2.cvtColor(np.uint8([[[int(colour[5:7], 16), int(colour[3:5], 16), int(colour[1:3], 16)]]]),
+                               cv2.COLOR_BGR2HSV)[0, 0]
+            if hsv[1] < 90 or hsv[2] < 80:
+                st.warning("This colour is dull or dark — customers' clothes (grey, brown, black, beige) can look like it. "
+                           "A bright uniform (orange, green, blue, red) is recognised far more reliably.")
+            st.caption("Works best with a bright colour customers rarely wear (e.g. the shop's orange or green T-shirt). "
+                       "Someone is marked **Staff** after the camera sees the uniform on them for about a second; "
+                       "staff aren't counted as visitors, aren't matched to bills, and don't set off the store-room alert.")
+            frame = eng.latest_raw
+            if frame is not None:
+                from src.camera_stream import shirt_region, uniform_share, hex_to_bgr, UNIFORM_MATCH
+
+                h, w = frame.shape[:2]
+                bodies = eng.detect_people(frame)
+                found = [(b, "body") for b in bodies] + [(f, "face") for f in eng.detect_faces(frame, bodies)]
+                checks = [uniform_share(frame, r, hex_to_bgr(colour)) for r in
+                          (shirt_region(b, k, w, h) for b, k in found) if r is not None]
+                if checks:
+                    staff = sum(c >= UNIFORM_MATCH for c in checks)
+                    st.caption(f"Right now: {len(checks)} person(s) in view — {staff} wearing the uniform.")
+        new = {"on": bool(on), "hex": colour}
+        if new != {"on": bool(u.get("on")), "hex": u.get("hex") or "#1E78C8"}:
+            lay = copy.deepcopy(eng.layout)
+            lay["uniform"] = new
+            save_layout(lay)
+            eng.set_layout(lay)
+            SS["cam_layout_edit"] = copy.deepcopy(lay)
+            st.rerun()
+
+
 def _setup_tab(eng: StoreVisionEngine, source: str) -> None:
     if source == "demo":
         st.info("The demo shop's zones are fixed. Switch the camera to **Webcam** or **ESP32-CAM** to set up your own.")
@@ -560,6 +615,7 @@ def _setup_tab(eng: StoreVisionEngine, source: str) -> None:
         st.caption("A laptop webcam or a camera above the billing counter sees people's faces and upper bodies — "
                    "use **People in view**. A camera that sees the whole doorway from above — use **Door line**, "
                    "which also tells coming in from going out and follows each customer to the counter.")
+    _uniform_setup(eng)
     frame = eng.latest_raw
     if frame is None:
         st.info("Start the camera on the **Live** tab first — placing zones needs a picture of the shop.")

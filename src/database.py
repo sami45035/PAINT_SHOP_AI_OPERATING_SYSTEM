@@ -129,6 +129,18 @@ def _has_shop_data(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _owner_settings(path) -> Dict[str, list]:
+    """What the owner set in the app (kept when the sample data is rebuilt)."""
+    out = {"settings": [], "alerts": []}
+    try:
+        with sqlite3.connect(path) as c:
+            out["settings"] = c.execute("SELECT key, value FROM app_settings WHERE key != 'seed_id';").fetchall()
+            out["alerts"] = c.execute("SELECT alert_id, action, acted_at, hidden_until FROM alert_actions;").fetchall()
+    except sqlite3.Error:
+        pass
+    return out
+
+
 def _rebuild_sample_for_today() -> bool:
     """Replace the live database with freshly generated sample data ending today. False if that failed."""
     import importlib.util
@@ -149,8 +161,13 @@ def _rebuild_sample_for_today() -> bool:
         with contextlib.redirect_stdout(_io.StringIO()):
             mod.build(tmp)
         sid = _seed_id(SAMPLE_DB_PATH)
-        with sqlite3.connect(tmp) as c:              # same stamp as the repo's sample, so it isn't copied over again
-            if sid:
+        keep = _owner_settings(DB_PATH)                # camera set-up, uniform, dismissed alerts: the owner's, not sample data
+        with sqlite3.connect(tmp) as c:
+            for key, value in keep["settings"]:
+                c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?);", (key, value))
+            for row in keep["alerts"]:
+                c.execute("INSERT OR REPLACE INTO alert_actions (alert_id, action, acted_at, hidden_until) VALUES (?, ?, ?, ?);", row)
+            if sid:                                    # same stamp as the repo's sample, so it isn't copied over again
                 c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('seed_id', ?);", (sid,))
         with _LIVE_LOCK:
             for extra in ("-wal", "-shm"):

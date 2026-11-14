@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-import numpy as np
 
 from src import billing, clock
 from src import config as cfg

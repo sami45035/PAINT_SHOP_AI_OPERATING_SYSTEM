@@ -1,0 +1,54 @@
+# End-to-end test with the real Streamlit and Chromium (fake cameras).
+# Runs on pushes to the e2e-ci branch; the report, screenshots and server log
+# are pushed to the e2e-results branch.
+name: e2e
+
+on:
+  push:
+    branches: [e2e-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt pytest playwright
+          python -m playwright install --with-deps chromium
+          python -c "import streamlit, sys; print('streamlit', streamlit.__version__, 'python', sys.version)"
+
+      - name: Unit and scene tests
+        id: unit
+        continue-on-error: true
+        run: python -m pytest -q tests 2>&1 | tee pytest.log
+
+      - name: Browser end-to-end test
+        id: browser
+        continue-on-error: true
+        run: python tests/browser/run_e2e.py "$RUNNER_TEMP/e2e" 2>&1 | tee e2e.log
+
+      - name: Publish results
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/results"; mkdir -p "$out"
+          cp pytest.log e2e.log "$out"/ 2>/dev/null || true
+          find "$RUNNER_TEMP/e2e" -maxdepth 1 \( -name '*.png' -o -name '*.json' -o -name '*.log' -o -name '*.mp4' -o -name '*.webm' \) -exec cp {} "$out"/ \;
+          echo "${GITHUB_SHA}" > "$out/commit.txt"
+          echo "unit=${{ steps.unit.outcome }} browser=${{ steps.browser.outcome }}" > "$out/outcome.txt"
+          cd "$out"
+          git init -q -b e2e-results
+          git config user.name "e2e bot"; git config user.email "e2e@users.noreply.github.com"
+          git add -A && git commit -qm "e2e results for ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" e2e-results
