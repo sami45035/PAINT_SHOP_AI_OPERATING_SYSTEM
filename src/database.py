@@ -339,8 +339,13 @@ def _day_totals(cur, d: date, until_time: str = "23:59:59") -> Dict[str, float]:
         if _has_table(cur, "visits") else None
     bills_vs_visitors = int(sales[2])
     if cam_from:
-        bills_vs_visitors = cur.execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? "
-                                        "AND sale_timestamp <= ?;", (cam_from, cap)).fetchone()[0]
+        # the bills saved at the counter (Scan & Bill) since then — as on the Store Camera screen
+        if _has_table(cur, "bills"):
+            bills_vs_visitors = cur.execute("SELECT COUNT(*) FROM bills WHERE source = 'app' AND status = 'paid' "
+                                            "AND created_at >= ? AND created_at <= ?;", (cam_from, cap)).fetchone()[0]
+        else:
+            bills_vs_visitors = cur.execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? "
+                                            "AND sale_timestamp <= ?;", (cam_from, cap)).fetchone()[0]
     return {
         "revenue": float(sales[0]),
         "units": int(sales[1]),

@@ -156,12 +156,10 @@ class TestCounterCamera(E2E):
         with mock.patch.object(clock, "now_naive", return_value=later), \
                 mock.patch.object(clock, "now", return_value=later), mock.patch.object(clock, "today", return_value=later.date()):
             s = db.get_sales_summary(30)
-            n = sqlite3.connect(self.tmp).execute("SELECT COUNT(DISTINCT invoice_no) FROM sales WHERE sale_timestamp >= ? "
-                                                  "AND sale_timestamp <= ?", (cam_from, later.strftime("%Y-%m-%d %H:%M:%S"))).fetchone()[0]
         self.assertEqual(s["today_visitors"], 2)
-        self.assertEqual(s["today_bills_vs_visitors"], n)
-        self.assertGreater(s["today_invoices"], n)                 # the day's sample bills from before 11:00
-        self.assertTrue(s["today_conversion_pct"] is None or s["today_conversion_pct"] <= 100)
+        self.assertEqual(s["today_bills_vs_visitors"], 1)          # the one bill saved at the counter, not sample sales
+        self.assertGreater(s["today_invoices"], 1)                 # the day's sample bills still count as sales
+        self.assertEqual(s["today_conversion_pct"], 50.0)          # same as the Store Camera screen
 
     def test_visit_times_are_when_they_were_there(self):
         r = run(self.tmp, COUNTER)

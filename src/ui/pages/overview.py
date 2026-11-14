@@ -109,7 +109,7 @@ def render() -> None:
         elif conv is None:
             sub = f"{b} bills{since}, camera counted {v} — it missed some people"
         else:
-            sub = f"{b} bills ÷ {v} visitors{since}"
+            sub = f"{b} bill{'s' if b != 1 else ''} ÷ {v} visitors{since}"
         kpi_card("Visitors who bought", f"{conv:.1f}%" if conv is not None else "—", sub)
     with c4:
         kpi_card("Stock value (cost)", rupees_short(s["total_inventory_cost"]), f"{s['total_active_skus']} products on shelf")
