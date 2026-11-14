@@ -127,10 +127,10 @@ To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 The billing counter, inside the app (`src/billing.py`, screen `src/ui/pages/scan_bill.py`).
 
 1. **Print labels** (expander at the bottom): an A4 PDF of QR labels, 21 per page — fast movers, chosen products or all. Each QR holds `APX:<SKU>`.
-2. **Scan** with the laptop or phone camera (QR, EAN-13, Code-128… via the browser's barcode reader, jsQR as a fallback). Press **Start scanner** once — it stays on between scans, after saving, and comes back by itself if the page reloads (it pauses while the phone is locked). Each scan adds one can (the same can held in view isn't counted twice); the cart — count, colours, total, **Undo** and **Save bill** — sits on the camera picture, so on a phone you never scroll. A can's own barcode can be **linked once** to a product and then scans directly. Or add by name.
-3. **Save bill** — in one transaction: a `bills` row, one `sales` row per line, and stock goes down can by can from the batch that **expires first** (FIFO). Two counters can't both sell the last can. If the shelf has a can the system thinks is gone, the bill can still be saved (stock stops at 0, never below) — that's a count to fix.
-4. **Send on WhatsApp** — the bill as a message to the customer's number (no API needed).
-5. **Void** a wrong bill — the exact cans go back to the exact batches.
+2. **Scan** with the laptop or phone camera (QR, EAN-13, Code-128… via the browser's barcode reader, jsQR as a fallback). Tap **Start scanning** once; each scan adds one can (the same can held in view isn't counted twice). The bill sits right under the camera: − / + per can, **Undo**, and Cash / UPI / Card / Credit. A can's own barcode can be **linked once** to a product and then scans directly. Or add by name. The camera pauses after 3 minutes without a scan, and when the phone is locked.
+3. **Save bill** — in one transaction: a `bills` row, one `sales` row per line, and stock goes down can by can from the batch that **expires first** (FIFO). Two counters can't both sell the last can. If the stock book shows fewer cans than the bill, the button says *Save anyway* and the stock stops at 0 (never below) — that's a count to fix.
+4. **The camera closes and the saved bill appears** in its place: type the customer's mobile and tap **WhatsApp** to send it (the number is kept on the bill), then **Next customer** to scan again.
+5. **Void** a wrong bill from *Today's bills* — the exact cans go back to the exact batches.
 6. **Didn't buy** — one tap with the reason. *Not in stock* asks which shade; a shade asked for twice in a week shows up in **Alerts → Lost sales**.
 
 Sales, the forecast, reorder and the camera's *who bought* all read the same tables, so one scan updates everything.

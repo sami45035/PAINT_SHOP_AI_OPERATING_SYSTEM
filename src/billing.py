@@ -246,6 +246,16 @@ def create_bill(lines: Sequence[Dict[str, Any]], customer_type: str = "Retail Wa
     }
 
 
+def set_phone(invoice_no: str, phone: str) -> None:
+    """The customer's number, given when the bill is sent on WhatsApp (for repeat customers later)."""
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())[:15]
+    if not digits:
+        return
+    with _conn() as conn:
+        conn.execute("UPDATE bills SET customer_phone = ? WHERE invoice_no = ?;", (digits, invoice_no))
+        conn.commit()
+
+
 def void_bill(invoice_no: str) -> bool:
     """Cancel a bill: cans go back to the batches they came from, the sale lines are removed."""
     conn = _conn()

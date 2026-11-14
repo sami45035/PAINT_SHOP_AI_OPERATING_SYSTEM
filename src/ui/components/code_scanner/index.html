@@ -3,108 +3,131 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root { --teal:#0B6E79; --ink:#15202B; --slate:#5A6472; --line:#E2E5EA; }
+  :root { --teal:#0B6E79; --green:#067647; --ink:#15202B; --slate:#5A6472; --line:#E2E5EA; --soft:#F4F5F7; --warn:#B54708; }
   * { box-sizing:border-box; }
-  html, body { margin:0; padding:0; background:transparent; font-family:Inter, system-ui, -apple-system, sans-serif; color:var(--ink); }
-  .bar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:13px; flex-wrap:wrap; }
-  .btn { border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 14px; font:inherit; font-weight:600; color:var(--ink); cursor:pointer; }
-  .btn.primary { background:var(--teal); border-color:var(--teal); color:#fff; }
+  html, body { margin:0; padding:0; background:transparent; font-family:Inter, system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); }
+  button { font:inherit; }
+  #root { padding-bottom:2px; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:12px; padding:10px 14px; font-weight:650; color:var(--ink); cursor:pointer;
+         display:inline-flex; align-items:center; justify-content:center; gap:6px; -webkit-tap-highlight-color:transparent; }
+  .btn:active { transform:scale(.98); }
+  .btn.primary { background:var(--green); border-color:var(--green); color:#fff; }
+  .btn.teal { background:var(--teal); border-color:var(--teal); color:#fff; }
+  .btn.warn { background:var(--warn); border-color:var(--warn); color:#fff; }
+  .btn:disabled { opacity:.6; }
+  .btn.sm { padding:6px 10px; border-radius:10px; font-size:13px; }
+  .row { display:flex; align-items:center; gap:8px; }
+
+  /* camera */
+  .bar { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
   .pill { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 10px; border-radius:999px; font-weight:600; font-size:12px; background:#F0F1F4; color:var(--slate); }
-  .pill.live { background:#E5F3EB; color:#067647; }
+  .pill.live { background:#E5F3EB; color:var(--green); }
   .pill.err { background:#FCEBE9; color:#B42318; }
   .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
-  select { border:1px solid var(--line); border-radius:10px; padding:7px 8px; font:inherit; background:#fff; max-width:200px; }
-  .stage { position:relative; width:100%; aspect-ratio:4/3; max-height:56vh; background:#26313C; border-radius:10px; overflow:hidden; }
-  @media (max-width:640px) { .stage { aspect-ratio:1/1; max-height:62vh; } }
-  .toast { position:absolute; left:50%; top:12px; transform:translateX(-50%); background:rgba(6,118,71,.94); color:#fff; font-weight:700;
+  .bar .spacer { flex:1; }
+  .stage { position:relative; width:100%; aspect-ratio:4/3; max-height:300px; background:#26313C; border-radius:14px; overflow:hidden; }
+  video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .aim { position:absolute; left:18%; right:18%; top:16%; bottom:16%; border:3px solid rgba(255,255,255,.9); border-radius:16px;
+         box-shadow:0 0 0 2000px rgba(0,0,0,.28); transition:border-color .15s; display:none; }
+  .aim.hit { border-color:#4ADE80; }
+  .idle { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; text-align:center;
+          color:#D6DAE0; font-size:14px; padding:20px; line-height:1.45; }
+  .idle .btn { font-size:16px; padding:12px 22px; }
+  .toast { position:absolute; left:50%; top:10px; transform:translateX(-50%); background:rgba(6,118,71,.95); color:#fff; font-weight:700;
            font-size:14px; padding:7px 14px; border-radius:999px; white-space:nowrap; max-width:92%; overflow:hidden; text-overflow:ellipsis;
            opacity:0; transition:opacity .2s; pointer-events:none; }
   .toast.show { opacity:1; }
-  .toast.warn { background:rgba(181,71,8,.95); }
-  .cart { position:absolute; left:8px; right:8px; bottom:8px; background:rgba(255,255,255,.97); border-radius:12px; padding:8px 10px;
-          box-shadow:0 4px 16px rgba(0,0,0,.25); display:none; }
-  .cart.on { display:block; }
-  .cart-top { display:flex; align-items:center; gap:8px; }
-  .cart-count { font-weight:800; font-size:15px; }
-  .cart-total { margin-left:auto; font-weight:800; font-size:17px; color:var(--teal); }
-  .cart-lines { display:flex; gap:6px; overflow-x:auto; margin:6px 0; scrollbar-width:none; }
-  .cart-lines::-webkit-scrollbar { display:none; }
-  .ln { flex:none; display:inline-flex; align-items:center; gap:5px; background:#F3F4F6; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:600; }
-  .ln i { width:11px; height:11px; border-radius:50%; border:1px solid rgba(0,0,0,.15); display:inline-block; }
-  .cart-btns { display:flex; gap:6px; }
-  .cart-btns .btn { padding:9px 10px; }
-  .cart-btns .save { flex:1; background:#067647; border-color:#067647; color:#fff; font-size:15px; }
-  .cart-empty { font-size:13px; color:var(--slate); }
-  video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-  .aim { position:absolute; left:20%; right:20%; top:22%; bottom:22%; border:3px solid rgba(255,255,255,.85); border-radius:14px;
-         box-shadow:0 0 0 2000px rgba(0,0,0,.25); transition:border-color .15s; }
-  .aim.hit { border-color:#4ADE80; }
-  .msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:#C9CED6; font-size:14px; padding:24px; line-height:1.5; }
-  .last { margin-top:8px; font-size:13px; color:var(--slate); min-height:20px; }
-  .last b { color:var(--ink); }
+  .toast.warn { background:rgba(181,71,8,.96); }
+
+  /* cart */
+  .cart { margin-top:10px; border:1px solid var(--line); border-radius:14px; background:#fff; padding:10px 12px; }
+  .cart-head { display:flex; align-items:baseline; gap:8px; }
+  .cart-head .n { font-weight:750; font-size:16px; }
+  .cart-head .tot { margin-left:auto; font-weight:800; font-size:20px; color:var(--teal); }
+  .empty { color:var(--slate); font-size:14px; padding:4px 0; }
+  .lines { margin:6px 0 2px; }
+  .ln { display:flex; align-items:center; gap:8px; padding:7px 0; border-top:1px solid #F0F1F3; }
+  .ln:first-child { border-top:0; }
+  .sw { width:22px; height:22px; border-radius:6px; border:1px solid rgba(0,0,0,.12); flex:none; }
+  .ln .nm { flex:1; min-width:0; }
+  .ln .nm b { display:block; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ln .nm span { font-size:12px; color:var(--slate); }
+  .ln .nm span.short { color:#B42318; font-weight:600; }
+  .qty { display:flex; align-items:center; gap:2px; flex:none; }
+  .qty button { width:34px; height:34px; border-radius:10px; border:1px solid var(--line); background:#fff; font-size:18px; font-weight:700; cursor:pointer; color:var(--ink); }
+  .qty b { min-width:24px; text-align:center; font-size:15px; }
+  .amt { width:74px; text-align:right; font-weight:700; font-size:14px; flex:none; }
+  .seg { display:flex; gap:6px; margin:10px 0 8px; flex-wrap:wrap; }
+  .seg button { flex:1; min-width:64px; border:1px solid var(--line); background:#fff; border-radius:10px; padding:8px 6px; font-weight:650; font-size:13px; cursor:pointer; color:var(--ink); }
+  .seg button.on { background:#E6F2F3; border-color:var(--teal); color:var(--teal); }
+  .note { font-size:12.5px; color:var(--warn); background:#FFF6ED; border-radius:8px; padding:6px 8px; margin-bottom:8px; }
+  .actions { display:flex; gap:8px; }
+  .actions .save { flex:1; font-size:16px; padding:12px; }
+
+  /* receipt */
+  .rcpt { border:1px solid var(--line); border-radius:14px; background:#fff; padding:14px; }
+  .ok { display:flex; align-items:center; gap:10px; }
+  .tick { width:36px; height:36px; border-radius:50%; background:#E5F3EB; color:var(--green); display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; flex:none; }
+  .ok b { font-size:17px; display:block; }
+  .ok span { font-size:12.5px; color:var(--slate); }
+  .rl { display:flex; justify-content:space-between; gap:8px; font-size:14px; padding:4px 0; }
+  .rl span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rtot { display:flex; justify-content:space-between; border-top:1px solid var(--line); margin-top:6px; padding-top:8px; font-weight:800; font-size:18px; }
+  .wa { display:flex; gap:8px; margin-top:12px; }
+  .wa input { flex:1; min-width:0; border:1px solid var(--line); border-radius:12px; padding:10px 12px; font:inherit; font-size:15px; }
+  .next { width:100%; margin-top:10px; font-size:16px; padding:13px; }
 </style>
 </head>
 <body>
-<div class="bar">
-  <button id="start" class="btn primary">Start scanner</button>
-  <select id="devices" style="display:none" title="Which camera"></select>
-  <span id="state" class="pill"><span class="dot"></span>Scanner off</span>
+<div id="root">
+  <div id="scan">
+    <div class="bar">
+      <span id="state" class="pill"><span class="dot"></span>Scanner off</span>
+      <span class="spacer"></span>
+      <button id="flip" class="btn sm" style="display:none" title="Use another camera">⟲ Switch camera</button>
+      <button id="stop" class="btn sm" style="display:none">Stop</button>
+    </div>
+    <div class="stage">
+      <video id="video" playsinline muted></video>
+      <div class="aim" id="aim"></div>
+      <div class="toast" id="toast"></div>
+      <div class="idle" id="idle">
+        <button id="start" class="btn primary">▶ Start scanning</button>
+        <div id="msg">Hold each can's QR label (or barcode) inside the box.<br>The camera stays on until the bill is saved.</div>
+      </div>
+    </div>
+    <div class="cart" id="cart"></div>
+  </div>
+  <div id="receipt" style="display:none"></div>
 </div>
-<div class="stage">
-  <video id="video" playsinline muted></video>
-  <div class="aim" id="aim" style="display:none"></div>
-  <div class="toast" id="toast"></div>
-  <div class="cart" id="cart"></div>
-  <div class="msg" id="msg">Press <b>&nbsp;Start scanner&nbsp;</b> once — it stays on. Hold each can's QR label (or barcode) inside the box.</div>
-</div>
-<div class="last" id="last"></div>
 
 <script>
 (function () {
   function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
-  function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+  var root = document.getElementById("root"), lastH = 0;
+  function setHeight() {
+    var h = Math.ceil(root.getBoundingClientRect().height) + 4;     // the content, not the frame: shrinks as well as grows
+    if (h !== lastH) { lastH = h; send("streamlit:setFrameHeight", { height: h }); }
+  }
+  if (window.ResizeObserver) new ResizeObserver(setHeight).observe(root);
 
-  var video = document.getElementById("video"), btn = document.getElementById("start"), sel = document.getElementById("devices");
-  var state = document.getElementById("state"), msg = document.getElementById("msg"), aim = document.getElementById("aim");
-  var lastEl = document.getElementById("last");
-  var stream = null, timer = null, detector = null, jsqrReady = false, busy = false;
+  var $ = function (id) { return document.getElementById(id); };
+  var video = $("video"), aim = $("aim"), idle = $("idle"), msg = $("msg"), state = $("state");
+  var cartEl = $("cart"), scanEl = $("scan"), rcptEl = $("receipt"), toastEl = $("toast");
+  var stream = null, timer = null, detector = null, jsqrReady = false, busy = false, audio = null;
   var canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
-  var recent = {}, REPEAT_MS = 2500;
-  var audio = null;
-  var toastEl = document.getElementById("toast"), cartEl = document.getElementById("cart");
-  var lastNotice = null, toastTimer = null, sentAction = 0;
-  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  var recent = {}, REPEAT_MS = 2500, IDLE_MS = 3 * 60 * 1000, lastActive = Date.now();
+  var devices = [], deviceIdx = -1;
+  var args = {}, payment = null, lastNotice = null, shownDone = null, ackDone = null, toastTimer = null;
 
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  function esc(t) { return String(t == null ? "" : t).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function emit(value) { value.ts = Date.now() + Math.random(); send("streamlit:setComponentValue", { value: value, dataType: "json" }); }
+  function setState(text, cls) { state.className = "pill " + (cls || ""); state.innerHTML = '<span class="dot"></span>' + text; }
   function toast(text, warn) {
     toastEl.textContent = text; toastEl.className = "toast show" + (warn ? " warn" : "");
-    clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.className = "toast"; }, 2200);
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.className = "toast"; }, 2000);
   }
-  function esc(t) { return String(t == null ? "" : t).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
-  function action(name) {
-    sentAction = Date.now();
-    send("streamlit:setComponentValue", { value: { action: name, ts: sentAction }, dataType: "json" });
-  }
-  function drawCart(c) {
-    if (!c) { cartEl.className = "cart"; return; }
-    cartEl.className = "cart on";
-    if (!c.count) {
-      cartEl.innerHTML = '<div class="cart-empty">🛒 Cart is empty — hold a can\'s QR inside the box</div>';
-    } else {
-      var lines = (c.lines || []).map(function (l) {
-        return '<span class="ln"><i style="background:' + esc(l.hex) + '"></i>' + esc(l.qty) + ' × ' + esc(l.label) + '</span>';
-      }).join("");
-      cartEl.innerHTML = '<div class="cart-top"><span class="cart-count">🛒 ' + c.count + ' can' + (c.count === 1 ? '' : 's') + '</span>'
-        + '<span class="cart-total">' + esc(c.total) + '</span></div>'
-        + '<div class="cart-lines">' + lines + '</div>'
-        + '<div class="cart-btns"><button class="btn" id="undo">↶ Undo</button>'
-        + '<button class="btn save" id="save">Save bill · ' + esc(c.total) + '</button></div>';
-      document.getElementById("undo").onclick = function () { action("undo"); };
-      document.getElementById("save").onclick = function () { this.disabled = true; this.textContent = "Saving…"; action("save"); };
-    }
-    setHeight();
-  }
-
-  function setState(text, cls) { state.className = "pill " + (cls || ""); state.innerHTML = '<span class="dot"></span>' + text; }
 
   function beep() {
     try {
@@ -119,24 +142,24 @@
 
   function found(code, format) {
     var now = Date.now();
-    if (recent[code] && now - recent[code] < REPEAT_MS) return;     // the same can still in front of the camera
-    recent[code] = now;
+    if (recent[code] && now - recent[code] < REPEAT_MS) return;      // the same can still in front of the camera
+    recent[code] = now; lastActive = now;
     beep();
-    lastEl.innerHTML = "Scanned: <b>" + code.replace(/</g, "&lt;") + "</b>";
-    send("streamlit:setComponentValue", { value: { code: code, format: format || "", ts: now }, dataType: "json" });
+    emit({ code: code, format: format || "" });
   }
 
+  // ---------------------------------------------------------------- reading codes
   async function setupDecoder() {
+    if (detector || jsqrReady) return true;
     if ("BarcodeDetector" in window) {
       try {
         var want = ["qr_code", "ean_13", "ean_8", "code_128", "code_39", "upc_a", "upc_e", "itf"];
         var have = await window.BarcodeDetector.getSupportedFormats();
         var formats = want.filter(function (f) { return have.indexOf(f) >= 0; });
-        if (formats.length) { detector = new window.BarcodeDetector({ formats: formats }); return "barcodes + QR"; }
+        if (formats.length) { detector = new window.BarcodeDetector({ formats: formats }); return true; }
       } catch (e) { detector = null; }
     }
-    // Fallback (e.g. Chrome on Windows): jsQR reads QR labels
-    await new Promise(function (ok) {
+    await new Promise(function (ok) {                                  // e.g. Chrome on Windows: jsQR reads QR labels
       if (window.jsQR) return ok();
       var s = document.createElement("script");
       s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
@@ -144,11 +167,14 @@
       document.head.appendChild(s);
     });
     jsqrReady = !!window.jsQR;
-    return jsqrReady ? "QR labels" : "";
+    return jsqrReady;
   }
 
   async function tick() {
     if (busy || !stream || !video.videoWidth) return;
+    if (Date.now() - lastActive > IDLE_MS) {                           // nobody scanning: save the battery
+      stop(); msg.innerHTML = "Paused after 3 minutes without a scan, to save battery."; return;
+    }
     busy = true;
     try {
       if (detector) {
@@ -158,94 +184,179 @@
         var w = 640, h = Math.round(w * video.videoHeight / video.videoWidth);
         canvas.width = w; canvas.height = h;
         ctx.drawImage(video, 0, 0, w, h);
-        var img = ctx.getImageData(0, 0, w, h);
-        var q = window.jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
+        var q = window.jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: "dontInvert" });
         if (q && q.data) found(q.data, "qr_code");
       }
     } catch (e) { /* a frame that couldn't be read */ }
     busy = false;
   }
 
+  // ---------------------------------------------------------------- camera
   async function listCameras() {
     try {
-      var devs = (await navigator.mediaDevices.enumerateDevices()).filter(function (d) { return d.kind === "videoinput"; });
-      if (devs.length > 1) {
-        var cur = stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings().deviceId;
-        sel.innerHTML = devs.map(function (d, i) {
-          return '<option value="' + d.deviceId + '"' + (d.deviceId === cur ? " selected" : "") + ">" + (d.label || ("Camera " + (i + 1))) + "</option>";
-        }).join("");
-        sel.style.display = "";
-      }
+      devices = (await navigator.mediaDevices.enumerateDevices()).filter(function (d) { return d.kind === "videoinput"; });
+      var cur = stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings().deviceId;
+      deviceIdx = Math.max(0, devices.findIndex(function (d) { return d.deviceId === cur; }));
+      $("flip").style.display = devices.length > 1 ? "" : "none";
     } catch (e) { /* ignore */ }
   }
 
   async function start(deviceId) {
     stop(true);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setState("Camera not available", "err");
-      msg.textContent = "This browser can't use a camera here. Open the app over https in Chrome, Edge or Safari — or add items by name.";
-      setHeight(); return;
+      setState("No camera", "err");
+      msg.textContent = "This browser can't use the camera here. Open the app in Chrome or Safari — or add cans by name below.";
+      return;
+    }
+    setState("Starting…");
+    if (!(await setupDecoder())) {
+      setState("Scanner unavailable", "err");
+      msg.textContent = "Couldn't load the code reader. Check the internet, or add cans by name below.";
+      return;
     }
     try {
-      setState("Asking for permission…");
-      var what = await setupDecoder();
-      if (!what) {
-        setState("Scanner unavailable", "err");
-        msg.textContent = "Couldn't load the code reader (no internet for the browser?). Add items by name instead.";
-        setHeight(); return;
+      deviceId = deviceId || store("apxScannerDevice") || undefined;
+      var size = { width: { ideal: 1280 }, height: { ideal: 720 } };
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+          video: Object.assign(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } }, size) });
+      } catch (e) {
+        if (!deviceId || e.name === "NotAllowedError") throw e;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: Object.assign({ facingMode: { ideal: "environment" } }, size) });
       }
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-                        : { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false });
       video.srcObject = stream; await video.play();
-      msg.style.display = "none"; aim.style.display = "";
-      btn.textContent = "Stop scanner"; btn.classList.remove("primary");
-      setState("Scanning · " + what, "live");
+      idle.style.display = "none"; aim.style.display = "block";
+      $("stop").style.display = "";
+      setState(detector ? "Scanning" : "Scanning QR labels", "live");
+      lastActive = Date.now();
       timer = setInterval(tick, 120);
       store("apxScannerOn", "1");
-      if (deviceId) store("apxScannerDevice", deviceId);
       listCameras();
     } catch (e) {
       stream = null;
-      var why = e && e.name === "NotAllowedError" ? "Camera permission was blocked. Click the camera icon in the address bar, allow it, then press Start again."
-              : e && e.name === "NotFoundError" ? "No camera found on this device."
-              : e && e.name === "NotReadableError" ? "The camera is busy — close other tabs or apps using it (e.g. Store Camera) and try again."
-              : "Couldn't start the camera (" + (e && e.name || "error") + ").";
       setState("Scanner off", "err");
-      msg.style.display = ""; msg.textContent = why;
+      msg.textContent = e && e.name === "NotAllowedError" ? "Camera permission is blocked. Tap the lock icon in the address bar, allow the camera, then tap Start."
+                      : e && e.name === "NotFoundError" ? "No camera found on this device."
+                      : e && e.name === "NotReadableError" ? "The camera is busy — close other tabs or apps using it (e.g. Store Camera) and try again."
+                      : "Couldn't start the camera (" + (e && e.name || "error") + ").";
     }
-    setHeight();
   }
+
   function stop(quiet) {
     if (timer) clearInterval(timer); timer = null;
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
-    stream = null; video.srcObject = null; aim.style.display = "none";
-    btn.textContent = "Start scanner"; btn.classList.add("primary");
+    stream = null; video.srcObject = null;
+    aim.style.display = "none"; idle.style.display = ""; $("stop").style.display = "none"; $("flip").style.display = "none";
     setState("Scanner off");
-    if (!quiet) { msg.style.display = ""; msg.innerHTML = "Scanner stopped."; store("apxScannerOn", "0"); }
+    if (!quiet) { store("apxScannerOn", "0"); msg.innerHTML = "Scanner off."; }
   }
-  btn.onclick = function () { if (stream) stop(); else start(sel.value || undefined); };
-  sel.onchange = function () { start(sel.value); };
-  window.addEventListener("resize", setHeight);
-  window.addEventListener("message", function (ev) {
-    var d = ev.data;
-    if (d && d.type === "streamlit:render") {
-      var a = d.args || {};
-      drawCart(a.cart);
-      var n = a.notice;
-      if (n && n.id && n.id !== lastNotice) { lastNotice = n.id; toast(n.text, n.kind === "warn"); }
-      setHeight();
+
+  $("start").onclick = function () { start(); };
+  $("stop").onclick = function () { stop(); };
+  $("flip").onclick = function () {
+    if (devices.length < 2) return;
+    deviceIdx = (deviceIdx + 1) % devices.length;
+    store("apxScannerDevice", devices[deviceIdx].deviceId);
+    start(devices[deviceIdx].deviceId);
+  };
+
+  // ---------------------------------------------------------------- cart (from the app)
+  function drawCart() {
+    var c = args.cart || { count: 0, lines: [] };
+    payment = payment || args.payment || "Cash";
+    if (!c.count) {
+      cartEl.innerHTML = '<div class="empty">🛒 The bill is empty — scan a can to start.</div>';
+      return;
     }
+    var lines = c.lines.map(function (l) {
+      return '<div class="ln"><span class="sw" style="background:' + esc(l.hex) + '"></span>'
+        + '<span class="nm"><b>' + esc(l.label) + '</b><span class="' + (l.short ? "short" : "") + '">'
+        + (l.short ? "only " + l.in_stock + " in stock" : esc(l.price) + " each") + '</span></span>'
+        + '<span class="qty"><button data-a="dec" data-p="' + l.pid + '" aria-label="one less">−</button><b>' + l.qty + '</b>'
+        + '<button data-a="inc" data-p="' + l.pid + '" aria-label="one more">+</button></span>'
+        + '<span class="amt">' + esc(l.amount) + '</span></div>';
+    }).join("");
+    var seg = (args.payments || ["Cash", "UPI", "Card"]).map(function (p) {
+      return '<button data-pay="' + esc(p) + '" class="' + (p === payment ? "on" : "") + '">' + esc(p) + '</button>';
+    }).join("");
+    var short = c.lines.filter(function (l) { return l.short; });
+    cartEl.innerHTML = '<div class="cart-head"><span class="n">🛒 ' + c.count + ' can' + (c.count === 1 ? "" : "s") + '</span>'
+      + '<span class="tot">' + esc(c.total) + '</span></div>'
+      + '<div class="lines">' + lines + '</div>'
+      + '<div class="seg">' + seg + '</div>'
+      + (short.length ? '<div class="note">The stock book shows fewer cans than this bill. Saving sets that stock to 0 — recount the shelf later.</div>' : "")
+      + '<div class="actions"><button class="btn" id="undo">↶ Undo</button>'
+      + '<button class="btn save ' + (short.length ? "warn" : "primary") + '" id="save">' + (short.length ? "Save anyway · " : "Save bill · ") + esc(c.total) + '</button></div>';
+    cartEl.querySelectorAll("[data-a]").forEach(function (b) {
+      b.onclick = function () { lastActive = Date.now(); emit({ action: b.dataset.a, pid: +b.dataset.p }); };
+    });
+    cartEl.querySelectorAll("[data-pay]").forEach(function (b) {
+      b.onclick = function () { payment = b.dataset.pay; drawCart(); };
+    });
+    $("undo").onclick = function () { emit({ action: "undo" }); };
+    $("save").onclick = function () {
+      this.disabled = true; this.textContent = "Saving…";
+      emit({ action: "save", payment: payment, force: short.length > 0 });
+    };
+  }
+
+  // ---------------------------------------------------------------- receipt
+  function drawReceipt(d) {
+    var rows = d.lines.map(function (l) { return '<div class="rl"><span>' + l.qty + ' × ' + esc(l.label) + '</span><span>' + esc(l.amount) + '</span></div>'; }).join("");
+    rcptEl.innerHTML = '<div class="rcpt"><div class="ok"><span class="tick">✓</span><div><b>Bill saved · ' + esc(d.total) + '</b>'
+      + '<span>' + esc(d.invoice) + ' · ' + esc(d.time) + ' · ' + esc(d.payment) + ' · stock updated</span></div></div>'
+      + '<div style="margin-top:10px">' + rows + '</div>'
+      + '<div class="rtot"><span>Total</span><span>' + esc(d.total) + '</span></div>'
+      + '<div class="wa"><input id="phone" type="tel" inputmode="numeric" placeholder="Customer\'s mobile (optional)" maxlength="14">'
+      + '<button class="btn teal" id="wa">WhatsApp</button></div>'
+      + '<button class="btn primary next" id="next">Next customer — start scanning</button></div>';
+    $("wa").onclick = function () {
+      var digits = ($("phone").value || "").replace(/\D/g, "");
+      if (digits.length === 10) digits = "91" + digits;
+      if (digits) emit({ action: "phone", phone: digits, invoice: d.invoice });
+      window.open("https://wa.me/" + digits + "?text=" + encodeURIComponent(d.wa_text), "_blank");
+    };
+    $("next").onclick = function () {
+      ackDone = d.invoice;
+      rcptEl.style.display = "none"; scanEl.style.display = "";
+      payment = null;
+      emit({ action: "next" });
+      start();                                                         // a tap -> the browser lets the camera start
+    };
+  }
+
+  function render(a) {
+    args = a || {};
+    var d = args.done;
+    if (d && d.invoice !== ackDone) {
+      if (shownDone !== d.invoice) {                                   // just saved: camera off, show the bill
+        shownDone = d.invoice;
+        stop(true); store("apxScannerOn", "0");
+        drawReceipt(d);
+      }
+      scanEl.style.display = "none"; rcptEl.style.display = "";
+    } else {
+      rcptEl.style.display = "none"; scanEl.style.display = "";
+      drawCart();
+    }
+    var n = args.notice;
+    if (n && n.id && n.id !== lastNotice) { lastNotice = n.id; if (!d || d.invoice === ackDone) toast(n.text, n.kind === "warn"); }
+    setHeight();
+  }
+
+  window.addEventListener("message", function (ev) {
+    var m = ev.data;
+    if (m && m.type === "streamlit:render") render(m.args);
   });
-  // phone locked / tab hidden: release the camera; back again: carry on scanning
+  // phone locked / tab hidden: let go of the camera; back again: carry on
   document.addEventListener("visibilitychange", function () {
     if (document.hidden && stream) { stop(true); store("apxScannerOn", "1"); }
-    else if (!document.hidden && !stream && store("apxScannerOn") === "1") start(store("apxScannerDevice") || undefined);
+    else if (!document.hidden && !stream && store("apxScannerOn") === "1" && rcptEl.style.display === "none") start();
   });
-  if (store("apxScannerOn") === "1") setTimeout(function () { start(store("apxScannerDevice") || undefined); }, 150);
   send("streamlit:componentReady", { apiVersion: 1 });
-  setHeight();
+  drawCart(); setHeight();
+  // the page was reloaded while scanning a bill: carry on (not after a saved bill)
+  setTimeout(function () { if (store("apxScannerOn") === "1" && rcptEl.style.display === "none" && !stream) start(); }, 300);
 })();
 </script>
 </body>

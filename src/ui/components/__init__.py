@@ -82,11 +82,14 @@ def decode_image(data_url: str):
     return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
 
 
-def code_scanner(*, key: str, cart: Optional[dict] = None, notice: Optional[dict] = None):
+def code_scanner(*, key: str, cart: Optional[dict] = None, done: Optional[dict] = None, notice: Optional[dict] = None,
+                 payment: str = "Cash", payments: Optional[list] = None):
     """
-    QR / barcode scanner in the browser; the camera stays on between scans.
-    cart   -> shown over the camera: {'count', 'total', 'lines': [{'qty', 'label', 'hex'}]}
-    notice -> a short message over the camera: {'id', 'text', 'kind': 'ok'|'warn'}
-    Returns the latest event: {'code', 'format', 'ts'} for a scan or {'action': 'save'|'undo', 'ts'}, or None.
+    The counter's scanner: camera, the bill being made, and the saved bill.
+    cart    -> {'count', 'total', 'lines': [{'pid', 'qty', 'label', 'hex', 'price', 'amount', 'in_stock', 'short'}]}
+    done    -> the bill just saved {'invoice', 'time', 'total', 'payment', 'lines', 'wa_text'}: camera off, receipt shown
+    notice  -> a short message over the camera {'id', 'text', 'kind': 'ok'|'warn'}
+    Returns the latest event: a scan {'code', 'format', 'ts'} or {'action': save|undo|inc|dec|next|phone, ..., 'ts'}.
     """
-    return _component("code_scanner")(key=key, default=None, cart=cart, notice=notice)
+    return _component("code_scanner")(key=key, default=None, cart=cart, done=done, notice=notice,
+                                      payment=payment, payments=payments)
