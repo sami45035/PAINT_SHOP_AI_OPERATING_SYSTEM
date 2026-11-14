@@ -62,7 +62,9 @@
 (function () {
   // ---------- Streamlit component protocol (no build step needed) ----------
   function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
-  function setHeight() { send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight + 4 }); }
+  function setHeight() {      // the content's height (documentElement.scrollHeight never shrinks below the frame)
+    send("streamlit:setFrameHeight", { height: Math.ceil(document.body.getBoundingClientRect().height) + 4 });
+  }
   function setValue(v) { send("streamlit:setComponentValue", { value: v, dataType: "json" }); }
 
   // ---------- state ----------

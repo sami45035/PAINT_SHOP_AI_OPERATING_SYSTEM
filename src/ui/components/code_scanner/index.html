@@ -105,9 +105,9 @@
 (function () {
   function send(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*"); }
   var root = document.getElementById("root"), lastH = 0;
-  function setHeight() {
+  function setHeight(force) {
     var h = Math.ceil(root.getBoundingClientRect().height) + 4;     // the content, not the frame: shrinks as well as grows
-    if (h !== lastH) { lastH = h; send("streamlit:setFrameHeight", { height: h }); }
+    if (force || h !== lastH) { lastH = h; send("streamlit:setFrameHeight", { height: h }); }
   }
   if (window.ResizeObserver) new ResizeObserver(setHeight).observe(root);
 
@@ -341,7 +341,7 @@
     }
     var n = args.notice;
     if (n && n.id && n.id !== lastNotice) { lastNotice = n.id; if (!d || d.invoice === ackDone) toast(n.text, n.kind === "warn"); }
-    setHeight();
+    setHeight(true);              // every render: a height sent before the app was listening must not leave the frame at 0
   }
 
   window.addEventListener("message", function (ev) {

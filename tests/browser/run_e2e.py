@@ -34,10 +34,17 @@ PAGES = ["overview", "sales-forecast", "colour-studio", "scan-bill", "stock", "a
 UNIFORM = "#f57800"
 
 results = []          # (name, ok, detail)
+SCREENS = {}          # open pages, photographed if a step fails
 
 
 def check(name, ok, detail=""):
     results.append((name, bool(ok), str(detail)))
+    if not ok:
+        for who, pg in SCREENS.items():
+            try:
+                pg.screenshot(path=str(WORK / f"fail_{len(results)}_{who}.png"), full_page=True)
+            except Exception:
+                pass
     print(("PASS " if ok else "FAIL ") + name + (f" — {detail}" if detail else ""), flush=True)
 
 
@@ -196,6 +203,7 @@ def counter_flow(pw, db: Path):
     pctx.expose_function("__apxDecode", decode)
     pctx.add_init_script(SHIM)
     phone = pctx.new_page()
+    SCREENS.update(laptop=laptop, phone=phone)
     js_errors = []
     for p in (laptop, phone):
         p.on("pageerror", lambda e: js_errors.append(str(e)))
@@ -318,7 +326,10 @@ def main():
             browser = pw.chromium.launch()
             page_tour(browser)
             browser.close()
-            counter_flow(pw, db)
+            try:
+                counter_flow(pw, db)
+            except Exception as exc:                  # record where it stopped, with pictures of both screens
+                check("counter flow ran to the end", False, f"{type(exc).__name__}: {str(exc)[:400]}")
     finally:
         stop_app(proc)
     log = (WORK / "server.log").read_text()
