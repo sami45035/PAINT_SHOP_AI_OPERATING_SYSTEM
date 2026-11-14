@@ -21,9 +21,31 @@ except ImportError:  # pragma: no cover - Python < 3.9
     STORE_TZ = timezone(timedelta(hours=5, minutes=30), "IST")
 
 
+def _demo_offset() -> timedelta:
+    """
+    APEX_DEMO_TIME=HH:MM (only for filming a demo): the clock starts at that time of
+    today, then runs normally — so a video filmed at night shows an open shop.
+    Never set on the live app.
+    """
+    import os
+
+    v = os.getenv("APEX_DEMO_TIME", "").strip()
+    if not v:
+        return timedelta(0)
+    try:
+        hh, mm = (int(x) for x in v.split(":")[:2])
+        real = datetime.now(STORE_TZ)
+        return real.replace(hour=hh, minute=mm, second=0, microsecond=0) - real
+    except ValueError:
+        return timedelta(0)
+
+
+_OFFSET = _demo_offset()
+
+
 def now() -> datetime:
     """Current time in the store's time zone (timezone-aware)."""
-    return datetime.now(STORE_TZ)
+    return datetime.now(STORE_TZ) + _OFFSET
 
 
 def now_naive() -> datetime:

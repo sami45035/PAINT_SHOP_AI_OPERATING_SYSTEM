@@ -357,6 +357,7 @@ def main():
         c.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
         c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('camera_layout', ?)",
                   (json.dumps({"count_mode": "presence", "uniform": {"on": True, "hex": e2e.UNIFORM}, "shelves": []}),))
+    os.environ["APEX_DEMO_TIME"] = "11:30"          # film an open shop, whatever the time on the filming machine
     proc = e2e.start_app(db)
     try:
         with sync_playwright() as pw:
