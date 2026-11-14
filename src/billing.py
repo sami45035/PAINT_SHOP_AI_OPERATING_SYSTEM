@@ -390,8 +390,17 @@ def label_sheet(product_ids: Sequence[int], copies: int = 1, fmt: str = "PDF") -
             d.rectangle([tx, y0 + 22, tx + 30, y0 + 52], fill=tuple(int(hx[i:i + 2], 16) for i in (0, 2, 4)),
                         outline=(120, 120, 120))
             d.text((tx + 40, y0 + 24), f"{float(r['pack_size_litres']):g} L", fill="black", font=font(22, True))
-            name = r["shade_name"] if len(r["shade_name"]) <= 16 else r["shade_name"][:15] + "…"
-            d.text((tx, y0 + 64), name, fill="black", font=font(20, True))
+            room = x0 + cw - 14 - tx                       # keep text inside the label
+            name, nf = r["shade_name"], font(20, True)
+            for size in (18, 16):                         # smaller type before cutting the name
+                if d.textlength(name, font=nf) <= room:
+                    break
+                nf = font(size, True)
+            if d.textlength(name, font=nf) > room:
+                while name and d.textlength(name + "…", font=nf) > room:
+                    name = name[:-1]
+                name = name.rstrip() + "…"
+            d.text((tx, y0 + 64), name, fill="black", font=nf)
             d.text((tx, y0 + 92), r["brand"][:18], fill=(90, 90, 90), font=font(16))
             d.text((tx, y0 + 116), f"₹{float(r['selling_price']):,.0f}", fill="black", font=font(20, True))
             d.text((tx, y0 + 146), r["sku"], fill=(120, 120, 120), font=font(13))
