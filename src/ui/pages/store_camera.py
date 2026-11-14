@@ -143,11 +143,15 @@ def _show_frame(frame) -> None:
 
 
 def _alert_banner(metrics: dict) -> None:
+    # Always exactly one element, alert or not: an element appearing above the live camera would move it,
+    # and Streamlit then rebuilds the camera frame — which switched the browser camera off at every alert.
+    slot = st.container()
     alert = (metrics or {}).get("security_alert")
     if alert:
         tag = " (demo)" if SS.get("cam_source") == "demo" else ""
-        banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}{tag}: "
-                                   f"{escape(alert['details'].split(' Photo:')[0])}")
+        with slot:
+            banner("act_now", "Alert", f"{escape(EVENT_WORDS.get(alert['type'], alert['type']))}{tag}: "
+                                       f"{escape(alert['details'].split(' Photo:')[0])}")
 
 
 @st.fragment(run_every=2)

@@ -112,8 +112,10 @@
     } catch (e) { /* ignore */ }
   }
 
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
   async function start(deviceId) {
-    stop();
+    stop(true);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setState("Camera not available", "err");
       msg.innerHTML = "This browser can't share a camera here. Open the app over https (Streamlit Cloud is) in Chrome, Edge or Safari.";
@@ -128,6 +130,8 @@
       msg.style.display = "none";
       btn.textContent = "Stop camera"; btn.classList.remove("primary");
       setState("Live · counting", "live");
+      store("apxLiveCamOn", "1");
+      if (deviceId) store("apxLiveCamDevice", deviceId);
       timer = setInterval(tick, Math.max(200, args.interval || 450));
       listCameras();
       draw();
@@ -142,7 +146,8 @@
     }
     setHeight();
   }
-  function stop() {
+  function stop(internal) {
+    if (!internal) store("apxLiveCamOn", "0");      // the owner pressed Stop: don't come back on by itself
     if (timer) clearInterval(timer); timer = null;
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     stream = null; video.srcObject = null;
@@ -171,6 +176,10 @@
   });
   send("streamlit:componentReady", { apiVersion: 1 });
   setHeight();
+  // The app rebuilt this frame while the camera was on (it must keep counting): carry on by itself.
+  setTimeout(function () {
+    if (!stream && store("apxLiveCamOn") === "1") start(store("apxLiveCamDevice") || undefined);
+  }, 300);
 })();
 </script>
 </body>

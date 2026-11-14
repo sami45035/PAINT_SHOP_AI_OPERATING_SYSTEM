@@ -274,6 +274,13 @@ def counter_flow(pw, db: Path):
     after = {s: stock(s) for s in before}
     check("stock went down by one can each", all(after[s] == before[s] - 1 for s in before), f"{before} -> {after}")
 
+    # mid-run: the shop camera is still counting (at night an after-hours alert has been raised by now)
+    phone.wait_for_timeout(at(70) * 1000)
+    state = cam.locator("#state").inner_text()
+    alert_on = laptop.get_by_text("Movement after hours").count() > 0
+    check("camera keeps counting while an alert shows", "Live" in state,
+          f"camera: {state}; after-hours alert on screen: {alert_on}")
+
     # B is at the counter 92-135 s: "just asking"
     phone.wait_for_timeout(at(112) * 1000)
     phone.get_by_role("button", name="Just asking", exact=True).click()
