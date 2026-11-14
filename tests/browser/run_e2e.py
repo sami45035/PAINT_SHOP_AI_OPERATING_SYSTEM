@@ -66,13 +66,15 @@ def stop_app(proc):
 
 
 # ----------------------------------------------------------------------------- page helpers
-def settle(page, quiet_ms=1500, timeout_s=90):
-    """Wait until Streamlit has finished running the script (no 'Running…' for a moment)."""
+def settle(page, quiet_ms=1200, timeout_s=180):
+    """Wait until Streamlit has finished running the script (the app says so on its root element)."""
     t0, quiet_since = time.time(), None
     while time.time() - t0 < timeout_s:
-        running = page.locator('[data-testid="stStatusWidget"]').count() > 0 and \
-            "Running" in (page.locator('[data-testid="stStatusWidget"]').first.inner_text() or "")
-        if running:
+        state = page.evaluate("() => { const a = document.querySelector('[data-test-script-state]');"
+                              " return a ? a.getAttribute('data-test-script-state') : null; }")
+        running = state == "running" or page.locator('[data-testid="stStatusWidget"]').count() > 0 and \
+            page.locator('[data-testid="stStatusWidget"] button').count() > 0
+        if running or state is None:
             quiet_since = None
         elif quiet_since is None:
             quiet_since = time.time()
@@ -96,6 +98,22 @@ def problems(page):
     return out
 
 
+def pick_radio(page, option):
+    page.locator('[data-testid="stRadio"] label').filter(has_text=option).first.click()
+
+
+def charts_drawn(page, timeout_s=25):
+    """Every chart on the page has finished drawing (not left as a grey placeholder)."""
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        n = page.locator('[data-testid="stPlotlyChart"]').count()
+        drawn = page.locator('[data-testid="stPlotlyChart"] .main-svg').count()
+        if n == 0 or drawn >= n:
+            return n, True
+        page.wait_for_timeout(500)
+    return page.locator('[data-testid="stPlotlyChart"]').count(), False
+
+
 def frame_of(page, part):
     return page.frame_locator(f'iframe[src*="{part}"]').first
 
@@ -110,14 +128,32 @@ def page_tour(browser):
         t0 = time.time()
         page.goto(f"{BASE}/{path}")
         page.wait_for_selector('[data-testid="stMain"], [data-testid="stAppViewContainer"]', timeout=60000)
-        done = settle(page)
+        live = path == "camera"                       # the live camera keeps refreshing: never "finished"
+        done = settle(page, timeout_s=20) or live
+        n_charts, drawn = charts_drawn(page)
         took = time.time() - t0
+        if n_charts:
+            check(f"page {path}: all {n_charts} charts drawn", drawn)
         page.screenshot(path=str(WORK / f"page_{path}.png"), full_page=True)
         bad = problems(page)
         check(f"page {path} opens cleanly", done and not bad, "; ".join(bad) or f"{took:.1f} s")
-    # Colour Studio: paint a sample room
+    # Colour Studio: the sample room is painted, shades are suggested, a designer look applies
     page.goto(f"{BASE}/colour-studio")
-    settle(page)
+    settle(page, timeout_s=300)                      # first visit downloads the wall model
+    imgs = page.locator('[data-testid="stImage"] img, [data-testid="stImageContainer"] img, iframe[src*="wall_brush"]').count()
+    body = page.locator("body").inner_text()
+    check("Colour Studio paints the sample room", imgs > 0 and "Pick a wall" in body and not problems(page),
+          f"{imgs} picture(s); " + "; ".join(problems(page)))
+    page.screenshot(path=str(WORK / "colour_studio_painted.png"), full_page=True)
+    looks = page.get_by_role("button", name="Use this look")
+    if looks.count():
+        looks.first.click()
+        settle(page, timeout_s=120)
+        check("a designer look applies to the photo", page.get_by_role("button", name="✓ On the photo").count() > 0
+              and not problems(page), "; ".join(problems(page)))
+        page.screenshot(path=str(WORK / "colour_studio_look.png"), full_page=True)
+    else:
+        check("designer looks are offered", False, "no 'Use this look' button")
     check("JS errors in the browser during the tour", not errors, "; ".join(errors[:3]))
     ctx.close()
 
@@ -174,7 +210,7 @@ def counter_flow(pw, db: Path):
     # laptop: Store Camera, webcam -> browser camera
     laptop.goto(f"{BASE}/camera")
     settle(laptop)
-    laptop.get_by_text("Webcam", exact=True).click()
+    pick_radio(laptop, "Webcam")
     settle(laptop)
     # uniform set-up screen renders with the setting on
     laptop.get_by_role("tab", name="Set up").click()
@@ -231,7 +267,7 @@ def counter_flow(pw, db: Path):
 
     # B is at the counter 92-135 s: "just asking"
     phone.wait_for_timeout(at(112) * 1000)
-    phone.get_by_role("button", name="Just asking / comparing").click()
+    phone.get_by_role("button", name="Just asking", exact=True).click()
     settle(phone)
     laptop.screenshot(path=str(WORK / "laptop_live.png"))
 
@@ -241,7 +277,7 @@ def counter_flow(pw, db: Path):
     settle(laptop)
     laptop.reload()
     settle(laptop)
-    laptop.get_by_text("Webcam", exact=True).click()
+    pick_radio(laptop, "Webcam")
     settle(laptop)
     body = laptop.locator("body").inner_text()
     laptop.screenshot(path=str(WORK / "laptop_after.png"), full_page=True)

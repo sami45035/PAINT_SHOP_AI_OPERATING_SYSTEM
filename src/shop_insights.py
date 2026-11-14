@@ -180,7 +180,9 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     for c in ("visitors", "at_counter", "bills"):
         if c not in hourly:
             hourly[c] = 0
-    hourly = hourly.fillna(0).sort_values("hour").reset_index(drop=True)
+    for c in ("visitors", "at_counter", "bills"):
+        hourly[c] = pd.to_numeric(hourly[c], errors="coerce").fillna(0)
+    hourly = hourly.sort_values("hour").reset_index(drop=True)
     hourly["bought_pct"] = ratio(hourly["bills"], hourly["visitors"], digits=0)
 
     rate = (bills / visitors) if (real_till and visitors) else None

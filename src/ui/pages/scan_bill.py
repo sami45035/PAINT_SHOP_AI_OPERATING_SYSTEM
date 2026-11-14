@@ -198,8 +198,10 @@ def _didnt_buy() -> None:
         opts = {int(r["product_id"]): f"{r['label']} · {r['brand']}" for r in cat.to_dict("records")}
         reasons = [(k, v) for k, v in billing.REASONS.items() if k != "other"]
         cols = st.columns(2) * ((len(reasons) + 1) // 2)
+        short = {"price": "Price too high", "not_in_stock": "Not in stock", "just_asking": "Just asking",
+                 "come_back": "Will come back"}
         for col, (key, text) in zip(cols, reasons):
-            if col.button(text, key=f"sb_no_{key}", use_container_width=True):
+            if col.button(short.get(key, text), key=f"sb_no_{key}", use_container_width=True, help=text):
                 if key == "not_in_stock":
                     SS["sb_ask_shade"] = True
                 else:
