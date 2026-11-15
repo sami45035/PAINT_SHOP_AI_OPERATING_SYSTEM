@@ -270,6 +270,7 @@ class Journey:
     in_staff_zone: bool = False
     counter_from: Any = None             # first / last moment at the billing counter (datetime) — bills are matched to this
     counter_to: Any = None
+    left_t: Optional[float] = None       # camera clock when last seen (people in view: they left then)
 
     @property
     def shelves(self) -> List[str]:

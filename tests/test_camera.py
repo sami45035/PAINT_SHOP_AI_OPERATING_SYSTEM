@@ -242,7 +242,7 @@ class TestBackgroundReader(unittest.TestCase):
 
 # ----------------------------------------------------------------------------- footfall: people in view (webcam)
 class TestPeopleInView(unittest.TestCase):
-    """A webcam at the counter: each person who stays in view is a visit; a missed frame isn't a new visitor."""
+    """A webcam at the counter: each person who stays in view is a visit; looking away for a while isn't a new visitor."""
 
     def test_counts_visits_not_frames(self):
         import src.camera_stream as cs
@@ -250,7 +250,8 @@ class TestPeopleInView(unittest.TestCase):
         face = (200, 80, 90, 90)
         frame = np.full((360, 480, 3), 120, np.uint8)
         t = [5000.0]
-        seen = [True] * 20 + [False] * 12 + [True] * 10 + [False] * 12
+        # in view 10 s, out 6 s (looked down), back 5 s — one visit; gone 95 s; a second visit of 5 s; gone
+        seen = [True] * 20 + [False] * 12 + [True] * 10 + [False] * 190 + [True] * 10 + [False] * 190
         seen[5] = seen[6] = seen[13] = False                    # face missed now and then (head turned)
         with mock.patch.object(cs.time, "time", side_effect=lambda: t[0]), \
                 mock.patch.object(cs.StoreVisionEngine, "detect_people", lambda self, f: []), \
@@ -269,7 +270,7 @@ class TestPeopleInView(unittest.TestCase):
         self.assertTrue(all(c.kwargs.get("source") == "camera" for c in lf.call_args_list))
         stays = [(c.args[2] - c.args[1]).total_seconds() for c in lv.call_args_list]
         self.assertEqual(len(stays), 2)
-        self.assertAlmostEqual(stays[0], 9.5, delta=1.0)        # in view about 10 s
+        self.assertAlmostEqual(stays[0], 20.5, delta=1.0)       # first seen to last seen, the 6 s away included
         self.assertAlmostEqual(stays[1], 4.5, delta=1.0)
 
     def test_camera_bills_only_since_it_started(self):

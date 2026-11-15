@@ -67,7 +67,10 @@ SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}
 BLUE = (235, 140, 60)
 LOST_JOURNEY_S = 600.0     # a customer the camera lost and never saw leaving is closed after 10 minutes
 PRESENCE_CONFIRM_S = 1.5   # "people in view" mode: in view this long = a visitor (not someone walking past)
-PRESENCE_GONE_S = 4.0      # ... and out of view this long = left
+PRESENCE_GONE_S = 4.0      # ... out of view this long = stepped away (no longer "in view")
+REID_WINDOW_S = 90.0       # ... and back within this long looking the same = the same visit; gone longer = left
+REID_LOOK = 40.0           # shirt colour distance (Lab) for "the same person" coming back
+REID_LOOK_NEAR = 60.0      # ... a bit more allowed when they come back at the same spot (hands, phone, light)
 IDLE_STOP_S = 60.0         # the background reader stops when no screen has looked for a minute
 COUNT_MODES = {
     "presence": "People in view — camera at the counter or desk (counts each person it sees)",
@@ -242,6 +245,7 @@ class StoreVisionEngine:
         self.total_exited = 0
         self.current_occupancy = 0
         self.staff_ids: set = set()                     # tracks recognised by the uniform (not counted)
+        self.away: Dict[int, "Track"] = {}               # people in view mode: out of view, may come back
         self._det_kinds: List[str] = []
 
         self.tracks: Dict[int, Track] = {}
@@ -566,7 +570,14 @@ class StoreVisionEngine:
             feet_visible = y + bh < frame_h - 3            # a box cut off by the frame bottom can't tell
             c = cents[di]
             best = assigned.get(di)
-            if best is None:
+            back = self._came_back(c, (x, y, bw, bh), looks[di], now_s) if best is None else None
+            if back is not None:                         # the same person after looking away / stepping out
+                tr = back
+                tr.centroid, tr.box, tr.last_seen = c, (x, y, bw, bh), now_s
+                tr.frames += 1
+                tr.history = (tr.history + [c[1]])[-20:]
+                self.tracks[tr.id] = tr
+            elif best is None:
                 tr = Track(self.next_track_id, c, (x, y, bw, bh), now_s, history=[c[1]], first_seen=now_s)
                 self.tracks[tr.id] = tr
                 self.next_track_id += 1
@@ -619,16 +630,54 @@ class StoreVisionEngine:
         for tid in [t for t, tr in self.tracks.items() if now_s - tr.last_seen > stale]:
             tr = self.tracks[tid]
             if presence:
-                if tr.counted_in and not tr.counted_out:      # out of view long enough: they left
-                    exited += 1
-                    tr.counted_out = True
-                    self._crossed.append((tr, "out"))
+                if (tr.counted_in and not tr.counted_out) or tr.staff:
+                    self.away[tid] = tr                   # out of view: wait and see if they come back
             else:
                 j = self.journeys.pop(tid, None)
                 if j is not None:
                     self.lost.append((j, now_s))           # may be the same person seen again at the door
             del self.tracks[tid]
+        if presence:                                       # away too long: they left (when last seen)
+            for tid in [t for t, tr in self.away.items() if now_s - tr.last_seen > REID_WINDOW_S]:
+                tr = self.away.pop(tid)
+                if tr.counted_in and not tr.counted_out:
+                    exited += 1
+                    tr.counted_out = True
+                    j = self.journeys.get(tid)
+                    if j is not None:
+                        j.left_t = tr.last_seen
+                    self._crossed.append((tr, "out"))
         return entered, exited
+
+    def _came_back(self, c, box, look, now_s: float) -> Optional["Track"]:
+        """
+        Someone appearing in view: is it a person who stepped away a moment ago (looked down at a phone,
+        turned, walked out of the picture)? Same size, and the same shirt colour — a little more colour
+        difference allowed at the same spot. Then they continue that visit instead of counting again.
+        """
+        if self.count_mode != "presence" or not self.away:
+            return None
+        best, best_score = None, None
+        for tid, tr in self.away.items():
+            ratio = box[3] / max(1.0, tr.height or tr.box[3])
+            if not 0.5 <= ratio <= 2.0:
+                continue
+            near = math.dist(c, tr.centroid) <= 1.2 * max(box[3], tr.box[3])
+            if look is not None and tr.look is not None:
+                dist = float(np.linalg.norm(look - tr.look))
+                if dist > (REID_LOOK_NEAR if near else REID_LOOK):
+                    continue
+                score = dist + (0 if near else 15)
+            else:
+                if not near:
+                    continue
+                score = 50.0
+            if best_score is None or score < best_score:
+                best, best_score = tr, score
+        if best is not None:
+            self.away.pop(best.id, None)
+            self._event("reid", "Same customer back in view — not counted again")
+        return best
 
     def _is_staff_box(self, tid: Optional[int]) -> bool:
         tr = self.tracks.get(tid) if tid is not None else None
@@ -640,8 +689,8 @@ class StoreVisionEngine:
         picked = j.net_picked
         # how long they stayed, by the camera's own clock (the same clock that tracks them)
         stay = max(0.0, time.time() - j.entered_t) if j.entered_t else 0.0
-        if self.count_mode == "presence" and seen_leaving:
-            stay = max(0.0, stay - PRESENCE_GONE_S)    # they left when last seen, not when we gave up waiting
+        if self.count_mode == "presence" and seen_leaving and j.left_t:
+            stay = max(0.0, j.left_t - j.entered_t)   # they left when last seen, not when we gave up waiting
         entered = j.entered_at or now.replace(tzinfo=None)
         if self.log_to_db:
             log_visit(self.data_source, entered, entered + timedelta(seconds=stay),
@@ -922,6 +971,7 @@ class StoreVisionEngine:
             "count_mode": self.count_mode,
             "at_counter": at_counter,
             "staff_seen": len(self.staff_ids),
+            "stepped_away": sum(1 for t in self.away.values() if not t.staff),
             "staff_in_view": sum(1 for t in self._det_tracks if self._is_staff_box(t)),
             "shelves": counts,
             "events": list(self.events[:12]),

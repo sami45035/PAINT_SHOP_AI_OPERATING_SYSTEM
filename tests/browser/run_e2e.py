@@ -288,7 +288,7 @@ def counter_flow(pw, db: Path):
     laptop.screenshot(path=str(WORK / "laptop_live.png"))
 
     # after the passer-by and the last person leaving
-    laptop.wait_for_timeout(at(166) * 1000)
+    laptop.wait_for_timeout(at(236) * 1000)
     cam.locator("#start").click()            # stop the camera before the video loops
     settle(laptop)
     laptop.reload()

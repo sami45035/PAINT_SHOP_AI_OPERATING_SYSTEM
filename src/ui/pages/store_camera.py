@@ -19,7 +19,7 @@ from PIL import Image
 
 from src import camera_charts as cc
 from src import clock, database as db
-from src.camera_stream import COUNT_MODES, SOURCE_LABELS, StoreVisionEngine
+from src.camera_stream import REID_WINDOW_S, COUNT_MODES, SOURCE_LABELS, StoreVisionEngine
 from src.config import ESP32_DEFAULT_STREAM_URL, STORE_CLOSE_HOUR, STORE_OPEN_HOUR
 from src.formatting import rupees
 from src.shop_vision import draw_layout, save_layout
@@ -37,7 +37,7 @@ EVENT_WORDS = {
 STATUS_CHIP = {"NEW": ("act_now", "New"), "SEEN": ("neutral", "Checked"), "VERIFIED": ("neutral", "Checked"),
                "RESOLVED": ("healthy", "Resolved"), "FALSE_ALARM": ("healthy", "False alarm")}
 DATA_SOURCES = {"camera": "This camera", "demo": "Demo shop", "sample": "Sample history (30 days)"}
-EVENT_CHIP = {"staff": ("neutral", "Staff"), "door": ("info", "Door"), "pick": ("soon", "Picked"), "put_back": ("neutral", "Put back"),
+EVENT_CHIP = {"staff": ("neutral", "Staff"), "reid": ("neutral", "Back"), "door": ("info", "Door"), "pick": ("soon", "Picked"), "put_back": ("neutral", "Put back"),
               "restock": ("healthy", "Refill"), "counter": ("info", "Counter"), "visit": ("neutral", "Visit"),
               "alert": ("act_now", "Alert")}
 
@@ -97,10 +97,11 @@ def _right_now(eng: StoreVisionEngine, metrics: dict) -> None:
                      f"customers · {staff_now} staff" if staff_now else "at the counter")
         with c3:
             kpi_card("Left today", str(counts["out"]), "visits finished")
-        st.caption("Counting **people in view**: someone who stays in view for about 1.5 s counts as a visitor; "
-                   "out of view for about 4 s counts as left. Change it in **Set up**.")
-    if eng.uniform is not None:
-        st.caption(f"Staff in uniform aren't counted — {metrics.get('staff_seen', 0)} recognised since the camera started.")
+        away = int(metrics.get("stepped_away", 0))
+        st.caption("Counting **people in view**: someone in view for about 1.5 s counts as a visitor. Someone out of view "
+                   f"(looking down, turning away, stepping out) who comes back within {int(REID_WINDOW_S)} s is the same "
+                   f"visit, not a new one; gone longer counts as left. Change it in **Set up**."
+                   + (f" Stepped away right now: {away}." if away else ""))
     else:
         with c1:
             kpi_card("Came in today", str(counts["in"]), "door line")
@@ -108,6 +109,8 @@ def _right_now(eng: StoreVisionEngine, metrics: dict) -> None:
             kpi_card("In the shop", str(metrics.get("inside_now", counts["inside"])), "customers")
         with c3:
             kpi_card("At the counter", str(metrics.get("at_counter", 0)), "right now")
+    if eng.uniform is not None:
+        st.caption(f"Staff in uniform aren't counted — {metrics.get('staff_seen', 0)} recognised since the camera started.")
     shelves = metrics.get("shelves") or {}
     slots = eng.layout.get("shelves", [])
     if slots:

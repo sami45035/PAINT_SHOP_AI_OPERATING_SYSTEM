@@ -227,7 +227,7 @@ def film(pw, db):
     laptop.wait_for_timeout(at(122))
     L.mark("camera_b_end")
 
-    laptop.wait_for_timeout(at(166))
+    laptop.wait_for_timeout(at(236))
     glide(laptop, cam.locator("#start"))                  # stop the camera before the video loops
     e2e.settle(laptop)
     laptop.reload()

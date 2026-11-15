@@ -22,7 +22,7 @@ SHOP_CAST = [   # (name, shirt, [(second, x, feet y, height)]) — fractions of 
     ("customer_b", GREEN,  [(92, .20, .93, .62), (94, .30, .93, .63), (133, .30, .93, .63), (135, .20, .93, .62)]),
     ("passer_by",  NAVY,   [(155, .05, .93, .60), (155.8, .25, .93, .60)]),
 ]
-SHOP_SECONDS = 175
+SHOP_SECONDS = 260          # an empty shop at the end: the last visitor is counted as left 90 s after last seen
 LABELS = [(1.5, 4.5, "APX:SKU-AS-1001", "Royale Blue 1 L"), (7.0, 10.0, "APX:SKU-NE-1070", "Honey Dew 4 L")]
 LABEL_SECONDS = 90
 

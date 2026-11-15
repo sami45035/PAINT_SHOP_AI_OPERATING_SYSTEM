@@ -14,6 +14,7 @@ from unittest import mock
 from src import billing, clock
 from src import config as cfg
 from src import database as db
+from src.camera_stream import REID_WINDOW_S
 from tests.people_scene import background, scene
 
 ORANGE = (0, 120, 245)        # the shop uniform (BGR)
@@ -61,6 +62,26 @@ DOOR = {
 }
 
 
+# --- 4. One person alone at the laptop who keeps looking away (down at the phone, turning, a hand over the face)
+GREY = (175, 172, 168)
+LOOKS_AWAY = {
+    "mode": "presence", "end": 75,
+    "cast": [("me", GREY, [(2, .45, .93, .64), (14, .45, .93, .64)]),       # in view
+             ("me", GREY, [(22, .47, .93, .65), (35, .47, .93, .65)]),      # out of view 8 s, back slightly moved
+             ("me", GREY, [(47, .44, .93, .63), (58, .44, .93, .63)]),      # out 12 s
+             ("me", GREY, [(64, .46, .93, .64), (75, .46, .93, .64)])],     # out 6 s
+    "bills": [], "no_sales": [],
+}
+
+# --- 5. One customer leaves, the next steps into the same spot 10 s later
+SAME_SPOT = {
+    "mode": "presence", "end": 50,
+    "cast": [("first", RED, [(2, .45, .93, .64), (25, .45, .93, .64)]),
+             ("next", GREEN, [(35, .45, .93, .64), (50, .45, .93, .64)])],
+    "bills": [], "no_sales": [],
+}
+
+
 class FakeTime:
     def __init__(self, t0):
         self.t = t0
@@ -93,7 +114,9 @@ def run(tmp, spec, uniform_on=True, frames=None):
             "SELECT product_id FROM inventory GROUP BY product_id HAVING SUM(current_stock) > 10 LIMIT 1").fetchone()[0])
         todo_b, todo_n = list(spec["bills"]), list(spec["no_sales"])
         t = 0.0
-        while t <= spec["end"] + 6:                   # a few seconds more: the last person is seen to leave
+        # run on after the scene: people in view count as left only after the stepped-away wait
+        tail = (REID_WINDOW_S + 6) if spec["mode"] == "presence" else 6
+        while t <= spec["end"] + tail:
             frame, _ = scene(t, spec["cast"], bg=bg)
             out, _ = eng.process_frame(frame)
             if frames is not None:
@@ -175,6 +198,21 @@ class TestCounterCamera(E2E):
         r = run(self.tmp, COUNTER, uniform_on=False)
         self.assertEqual(r["counts"]["in"], 3)
         self.assertEqual(len(r["eng"].staff_ids), 0)
+
+
+class TestSamePersonComingBack(E2E):
+    def test_looking_away_is_one_visit(self):
+        r = run(self.tmp, LOOKS_AWAY, uniform_on=False)
+        self.assertEqual((r["counts"]["in"], r["counts"]["out"]), (1, 1), r["counts"])
+        (came, left, _, _), = r["visits"]
+        secs = lambda v: (datetime.strptime(v, "%Y-%m-%d %H:%M:%S") - datetime.strptime(came[:11] + "11:00:00",
+                                                                                        "%Y-%m-%d %H:%M:%S")).seconds
+        self.assertLessEqual(abs(secs(came) - 2), 2)
+        self.assertLessEqual(abs(secs(left) - 75), 3)          # left when last seen, one visit throughout
+
+    def test_next_customer_at_the_same_spot_is_new(self):
+        r = run(self.tmp, SAME_SPOT, uniform_on=False)
+        self.assertEqual(r["counts"]["in"], 2, r["counts"])
 
 
 class TestUniformCapture(unittest.TestCase):
