@@ -11,6 +11,7 @@
 | **Overview** | How is the shop doing today? | L1 data · L2 dashboard |
 | **Sales Forecast** | What will sell in the next 30 days — and can I trust the forecast? | L3 |
 | **Colour Studio** | How will this shade look on the customer's wall? | L6 |
+| **Shade Match** | The customer brought a colour: exactly what is it, and which shade or base do we tint? | L6 |
 | **Scan & Bill** | Scan the can, print the bill — stock goes down by one at the same moment. Who bought, who didn't, and why? | L1 data · L5 |
 | **Stock & Reorder** (+ Deal Checker) | What should I order, how much, and by when? Is this supplier offer worth it? | L3 |
 | **Alerts** | What needs my attention right now? | L4 |
@@ -124,6 +125,26 @@ Licence note: NVIDIA's SegFormer weights are released for research / non-commerc
 To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 
 ---
+
+## Shade Match (`src/colour_match.py`)
+
+A customer brings a colour (an old paint chip, a cushion, a photo on their phone) and wants exactly that.
+The counter takes a photo (or uploads one, or types a hex code), taps the colour, and gets:
+
+- **The measured colour**: hex, RGB, light reflectance (LRV), a plain name ("muted navy") and the nearest standard colour name.
+- **The closest shades the shop can make**, ranked by CIEDE2000 (ΔE00): under 2 = exact match, under 5 = very close,
+  under 10 = same family, above that = tint to order. Each shows its tinting base (AB3, RB4…) and stock, and
+  *Try on a wall* opens it in Colour Studio.
+- **Tint to order**: when nothing is close, which base number to use (1 pastel … 4 deep) and how many of those bases are in stock,
+  plus a ticket for the tinting counter.
+
+**Lighting.** A phone photo is not a spectrophotometer: warm shop light can shift a colour by 3–7 ΔE. Put plain white
+paper beside the sample and tap it: the reading is white-balanced against the paper (≈90 % reflectance), which brings
+it back to under 1 ΔE in our tests. The sample is read from a small circle using the median brightness, so glare and
+shadow are ignored; a patterned spot is flagged.
+
+**Brand shade cards.** Load a fan deck as CSV (`brand, code, name, hex[, collection]`) to match against every shade a brand
+makes, not only the ones on the shelf. Loaded cards survive the demo data being rebuilt.
 
 ## Bases (tinting)
 

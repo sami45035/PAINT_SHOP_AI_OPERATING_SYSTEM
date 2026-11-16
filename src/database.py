@@ -131,11 +131,13 @@ def _has_shop_data(conn: sqlite3.Connection) -> bool:
 
 def _owner_settings(path) -> Dict[str, list]:
     """What the owner set in the app (kept when the sample data is rebuilt)."""
-    out = {"settings": [], "alerts": []}
+    out = {"settings": [], "alerts": [], "library": []}
     try:
         with sqlite3.connect(path) as c:
             out["settings"] = c.execute("SELECT key, value FROM app_settings WHERE key != 'seed_id';").fetchall()
             out["alerts"] = c.execute("SELECT alert_id, action, acted_at, hidden_until FROM alert_actions;").fetchall()
+            if _has_table(c, "shade_library"):     # brand fan decks the shop loaded (Shade Match)
+                out["library"] = c.execute("SELECT brand, code, name, hex, collection FROM shade_library;").fetchall()
     except sqlite3.Error:
         pass
     return out
@@ -167,6 +169,11 @@ def _rebuild_sample_for_today() -> bool:
                 c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?);", (key, value))
             for row in keep["alerts"]:
                 c.execute("INSERT OR REPLACE INTO alert_actions (alert_id, action, acted_at, hidden_until) VALUES (?, ?, ?, ?);", row)
+            if keep["library"]:
+                from src.colour_match import ensure_library
+                ensure_library(c)
+                c.executemany("INSERT OR IGNORE INTO shade_library (brand, code, name, hex, collection) VALUES (?, ?, ?, ?, ?);",
+                              keep["library"])
             if sid:                                    # same stamp as the repo's sample, so it isn't copied over again
                 c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('seed_id', ?);", (sid,))
         with _LIVE_LOCK:

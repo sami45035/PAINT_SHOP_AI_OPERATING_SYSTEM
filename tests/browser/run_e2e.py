@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 WORK = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/apex_e2e").resolve()
 PORT = 8599
 BASE = f"http://localhost:{PORT}"
-PAGES = ["overview", "sales-forecast", "colour-studio", "scan-bill", "stock", "alerts", "camera", "ask-aura"]
+PAGES = ["overview", "sales-forecast", "colour-studio", "shade-match", "scan-bill", "stock", "alerts", "camera", "ask-aura"]
 UNIFORM = "#f57800"
 
 results = []          # (name, ok, detail)
@@ -171,8 +171,43 @@ def page_tour(browser):
         page.screenshot(path=str(WORK / "colour_studio_look.png"), full_page=True)
     else:
         check("designer looks are offered", False, "no 'Use this look' button")
+    shade_match_flow(page)
     check("JS errors in the browser during the tour", not errors, "; ".join(errors[:3]))
     ctx.close()
+
+
+def shade_match_flow(page):
+    """A customer's terracotta chip photographed under warm shop light, white paper beside it."""
+    from tests.test_shade_match import WHITE, scene
+
+    photo = WORK / "shade_sample.png"
+    cv2.imwrite(str(photo), cv2.cvtColor(scene("#C85A32"), cv2.COLOR_RGB2BGR))
+    page.goto(f"{BASE}/shade-match")
+    settle(page)
+    pick_radio(page, "Upload photo")
+    settle(page)
+    page.locator('[data-testid="stFileUploader"] input[type="file"]').first.set_input_files(str(photo))
+    settle(page, timeout_s=60)
+    body = page.locator("body").inner_text()
+    check("Shade Match reads a photo and names the closest shade",
+          "Terracotta Sunset" in body and "Lighting not corrected" in body and not problems(page),
+          "; ".join(problems(page)) or body[body.find("What colour"):][:160].replace("\n", " | "))
+    page.screenshot(path=str(WORK / "shade_match_raw.png"), full_page=True)
+    pick_radio(page, "Tap white paper")
+    settle(page)
+    img = page.frame_locator('iframe[title*="image_coordinates"]').first.locator("img").first
+    box = img.bounding_box()
+    img.click(position={"x": WHITE[0] * box["width"], "y": WHITE[1] * box["height"]})
+    settle(page, timeout_s=60)
+    body = page.locator("body").inner_text()
+    check("white paper corrects the light: exact match, tint base shown",
+          "Lighting corrected" in body and "Exact match" in body and "#C85A32" in body and "Base 3" in body
+          and not problems(page), "; ".join(problems(page)) or body[body.find("What colour"):][:220].replace("\n", " | "))
+    page.screenshot(path=str(WORK / "shade_match_corrected.png"), full_page=True)
+    page.get_by_role("button", name="Try on a wall").first.click()
+    settle(page, timeout_s=300)
+    check("Try on a wall opens Colour Studio with that shade", "colour-studio" in page.url and not problems(page),
+          page.url)
 
 
 # ----------------------------------------------------------------------------- 2. the counter
