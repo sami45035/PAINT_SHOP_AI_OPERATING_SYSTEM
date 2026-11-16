@@ -35,7 +35,7 @@ SCENES = [
     ("buyers", "laptop", "Who bought, who didn't — and why",
      "Every bill matched to a visitor: 2 came in, 1 bought, 1 \"just asking\" — the staff member wasn't counted"),
     ("stock", "laptop", "Stock & pre-order", "What to order, how much and by when — sized by the forecast"),
-    ("alerts", "laptop", "Smart alerts", "Running out · lost sales · shelves to refill · theft · expiring stock · money stuck"),
+    ("alerts", "laptop", "Smart alerts", "Running out · lost sales · shelves to refill · expiring stock · money stuck"),
     ("aura", "laptop", "Ask Aura", "Ask anything about the shop in plain words"),
 ]
 
@@ -176,7 +176,7 @@ def end_png(path):
     rows = [("Order the right stock before festivals", "AI forecast learned from the shop's own sales"),
             ("Show customers their wall in any shade", "Colour Studio with designer palettes in stock"),
             ("Know who walks in, who buys — and why not", "Camera + Scan & Bill, staff never counted"),
-            ("Fewer stock-outs · more sales · less loss", "Alerts for running out, lost sales and theft")]
+            ("Fewer stock-outs · more sales · less waste", "Alerts for running out, lost sales and expiring stock")]
     y = 360
     for big, small in rows:
         d.ellipse([162, y + 16, 186, y + 40], fill=SAND)

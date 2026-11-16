@@ -7,7 +7,7 @@ owner can act on: what's wrong, why it matters, and the one thing to do.
 Levels: "act_now" (red), "soon" (amber), "look_into" (blue).
 """
 import sqlite3
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -211,13 +211,12 @@ def _visitor_alerts(ref: date) -> List[Dict[str, Any]]:
 
 
 def _camera_alerts(ref: date) -> List[Dict[str, Any]]:
-    """Shelf refills, walk-outs and shelf-vs-till gaps from the shop camera."""
+    """Shelf refills and picked-but-not-bought shades from the shop camera."""
     from src import shop_insights as si
 
     try:
         source = si.best_source(ref)
         po = si.preorder(source, ref)
-        th = si.theft(source, ref, days=3)
         fm = si.fast_movers(source, 7, day=ref)
     except Exception:  # noqa: BLE001 - no camera tables yet
         return []
@@ -230,26 +229,6 @@ def _camera_alerts(ref: date) -> List[Dict[str, Any]]:
             "title": f"{r['slot_name']} nearly empty — {r['label']}",
             "description": r["message"] + " An empty shelf loses the customer who doesn't ask.",
             "action": f"Refilled ({r['move']} cans)" if r["move"] else "Order more",
-        })
-    for e in th["walkouts"].to_dict("records") if not th["walkouts"].empty else []:
-        if e["status"] != "NEW":
-            continue
-        when = datetime.strptime(e["timestamp"], "%Y-%m-%d %H:%M:%S")
-        alerts.append({
-            "type": "UNPAID_EXIT", "group": "Theft", "level": "act_now", "severity": "CRITICAL",
-            "sku": f"ev{e['id']}", "event_id": int(e["id"]),
-            "title": f"Possible unpaid can — {clock.fmt_day(when.date())}, {clock.fmt_time(when)}",
-            "description": e["details"].split(" Photo:")[0] + " Check the photo and the bills from that time.",
-            "action": "Checked",
-        })
-    for g in th["shelf_vs_till"]:
-        alerts.append({
-            "type": "SHELF_TILL_GAP", "group": "Theft", "level": "soon", "severity": "WARNING",
-            "sku": f"gap{g['product_id']}:{ref.isoformat()}", "product_id": g["product_id"],
-            "title": f"{g['label']}: {g['missing']} can{'s' if g['missing'] != 1 else ''} left the shelf without a bill today",
-            "description": (f"The camera saw {g['taken']} taken off the shelf (not put back); the till sold {g['sold']}. "
-                            f"About {rupees(g['value'])} unaccounted — a missed bill, a can moved to the store room, or theft."),
-            "action": "Checked",
         })
     for h in fm["hesitant"][:2]:
         alerts.append({
@@ -305,7 +284,7 @@ def generate_smart_alerts(on_day: Optional[date] = None) -> Dict[str, List[Dict[
     - expiring:   batches expiring within EXPIRY_WARNING_DAYS (or already expired)
     - dead_stock: money stuck in slow sellers
     - anomalies:  days with many visitors but few bills
-    - camera:     shelves to refill, walk-outs with unpaid cans, shelf-vs-till gaps
+    - camera:     shelves to refill, shades picked up but rarely bought
     """
     from src.safety import guard
 

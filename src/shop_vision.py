@@ -5,13 +5,10 @@ Shop vision (Layer 5): what the camera learns about the shop, beyond boxes.
 2. Buyers       — each visitor's journey: which shelves they stood at, whether
                   they reached the billing counter. Bills come from the sales
                   table, so "visitors who bought" = bills / visitors.
-3. Theft        — a can leaves a shelf, the person who took it walks out
-                  without going to the counter -> UNPAID_EXIT alert with photo.
-                  Shelf picks are also reconciled with the day's bills.
-4. Fast movers  — every can taken off a monitored shelf is a "pick"; picks,
+3. Fast movers  — every can taken off a monitored shelf is a "pick"; picks,
                   put-backs and sales together show what moves and what people
                   pick up but don't buy.
-5. Shelf stock  — cans are counted on each shelf slot from the picture, so the
+4. Shelf stock  — cans are counted on each shelf slot from the picture, so the
                   app knows when a shelf needs refilling from the store room and
                   when the shop needs to pre-order.
 
@@ -21,7 +18,6 @@ Layout (all coordinates are fractions of the picture, so any camera size works):
     door:       {"y", "x1", "x2"}  door line — a person's feet crossing it
                 downward = coming in, upward = leaving
     counter:    [x1, y1, x2, y2]   where customers stand to pay (feet inside)
-    staff_zone: [x1, y1, x2, y2]   staff-only area (feet inside)
     shelves:    [{"id", "name", "box": [x1, y1, x2, y2], "product_id", "capacity"}]
                 one slot = one product, cans standing side by side
 """
@@ -41,7 +37,6 @@ Box = Tuple[int, int, int, int]          # x, y, w, h in pixels
 DEFAULT_LAYOUT: Dict[str, Any] = {
     "door": {"y": 0.68, "x1": 0.0, "x2": 1.0},
     "counter": [0.04, 0.55, 0.40, 0.95],
-    "staff_zone": [0.68, 0.10, 0.96, 0.58],
     "shelves": [],
 }
 
@@ -64,7 +59,6 @@ def demo_layout(products: Optional[Dict[Tuple[str, float], int]] = None) -> Dict
     return {
         "door": {"y": 0.50, "x1": 0.38, "x2": 0.64},
         "counter": [0.60, 0.62, 0.97, 0.80],
-        "staff_zone": [0.80, 0.42, 0.995, 0.60],
         "shelves": shelves,
     }
 
@@ -267,7 +261,6 @@ class Journey:
     near_s: Dict[str, float] = field(default_factory=dict)       # slot id -> seconds at it
     picks: Dict[str, int] = field(default_factory=dict)          # slot id -> cans taken (net)
     put_back: int = 0
-    in_staff_zone: bool = False
     counter_from: Any = None             # first / last moment at the billing counter (datetime) — bills are matched to this
     counter_to: Any = None
     left_t: Optional[float] = None       # camera clock when last seen (people in view: they left then)
@@ -283,8 +276,6 @@ class Journey:
     def outcome(self) -> str:
         if self.reached_counter:
             return "reached_counter"
-        if self.net_picked > 0:
-            return "unpaid_exit"
         return "browsed"
 
 
@@ -331,22 +322,21 @@ class DemoShop:
     camera. What happens (and what the app should conclude):
       0-24 s  Buyer: takes a can of Royale Blue 4 L (B2), pays at the counter, leaves
       12-36 s Browser: picks Teal Serenity 1 L (A2), reads it, puts it back, leaves
-      37-49 s Walk-out: takes Warm Beige 4 L (B1), leaves WITHOUT going to the counter
+      37-49 s Looker: looks at Warm Beige 4 L (B1), leaves without buying
       45-57 s Enquiry: goes straight to the counter, asks, leaves
       56-64 s Staff: comes out of the store room and refills the shelves
     """
 
     W, H, LOOP = 960, 540, 64.0
     START = {"A1": 1, "A2": 3, "A3": 4, "B1": 4, "B2": 4, "B3": 2}
-    SHELF_EVENTS = [(9.0, "B2", -1), (19.0, "A2", -1), (28.0, "A2", +1), (39.5, "B1", -1),
-                    (60.0, "B1", +1), (60.0, "B2", +1)]
+    SHELF_EVENTS = [(9.0, "B2", -1), (19.0, "A2", -1), (28.0, "A2", +1), (60.0, "B2", +1)]
     ACTORS = [
         ("buyer", (52, 101, 191), [(0, .51, .42), (4, .50, .62), (7, .18, .86), (11, .18, .86), (14, .72, .72),
                                    (19, .72, .72), (22, .51, .56), (24, .51, .42)]),
         ("browser", (60, 150, 90), [(12, .52, .42), (16, .30, .70), (18, .18, .86), (20, .18, .86), (21, .42, .80),
                                     (25, .42, .80), (27, .18, .86), (29, .18, .86), (31, .42, .75), (34, .50, .55),
                                     (36, .50, .42)]),
-        ("walkout", (40, 40, 160), [(37, .49, .42), (40, .08, .86), (42, .08, .86), (44, .30, .70), (47, .47, .55),
+        ("looker", (40, 40, 160), [(37, .49, .42), (40, .08, .86), (42, .08, .86), (44, .30, .70), (47, .47, .55),
                                     (49, .47, .42)]),
         ("enquiry", (150, 90, 160), [(45, .54, .42), (49, .74, .72), (52, .74, .72), (55, .54, .55), (57, .54, .42)]),
         ("staff", (30, 120, 200), [(56, .92, .50), (59, .13, .86), (61, .13, .86), (63.9, .92, .50)]),
@@ -409,7 +399,7 @@ class DemoShop:
         cv2.rectangle(f, (int(.44 * W), int(.08 * H)), (int(.58 * W), wall_y), (95, 120, 140), -1)
         cv2.rectangle(f, (int(.44 * W), int(.08 * H)), (int(.58 * W), wall_y), (60, 70, 80), 3)
         cv2.putText(f, "ENTRANCE", (int(.455 * W), int(.07 * H)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 70, 80), 1, cv2.LINE_AA)
-        # store room (staff only)
+        # store room
         cv2.rectangle(f, (int(.86 * W), int(.12 * H)), (int(.97 * W), int(.44 * H)), (70, 95, 125), -1)
         cv2.putText(f, "STORE", (int(.875 * W), int(.10 * H)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 70, 80), 1, cv2.LINE_AA)
         # shelf unit
@@ -483,10 +473,9 @@ def draw_layout(frame: np.ndarray, layout: Dict[str, Any], pending: Optional[Lis
     y = int(d["y"] * h)
     cv2.line(out, (int(d.get("x1", 0) * w), y), (int(d.get("x2", 1) * w), y), (74, 192, 245), 3)
     tag("Door line (coming in = crossing downward)", int(d.get("x1", 0) * w) + 4, y - 6, (74, 192, 245))
-    for key, name, col in (("counter", "Billing counter", (235, 140, 60)), ("staff_zone", "Staff only", (102, 112, 249))):
-        x1, y1, x2, y2 = to_px(layout[key], w, h)
-        cv2.rectangle(out, (x1, y1), (x2, y2), col, 2)
-        tag(name, x1 + 2, y1 + 18, col)
+    x1, y1, x2, y2 = to_px(layout["counter"], w, h)
+    cv2.rectangle(out, (x1, y1), (x2, y2), (235, 140, 60), 2)
+    tag("Billing counter", x1 + 2, y1 + 18, (235, 140, 60))
     for s in layout.get("shelves", []):
         x1, y1, x2, y2 = to_px(s["box"], w, h)
         cv2.rectangle(out, (x1, y1), (x2, y2), (128, 222, 74), 2)

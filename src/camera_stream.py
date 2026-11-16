@@ -4,7 +4,6 @@ Store Camera (Layer 5): the camera as a data source for the shop.
 Sources
 - "webcam": laptop / USB camera (the app reads it when running on that laptop;
             on Streamlit Cloud the browser sends frames instead)
-- "esp32":  ESP32-CAM MJPEG stream on the shop Wi-Fi
 - "demo":   a drawn paint shop (src.shop_vision.DemoShop). Its data is saved
             with source='demo' so it never mixes with real numbers.
 
@@ -18,10 +17,6 @@ Per frame
 - Shelves: cans counted on each shelf slot (shop_vision.ShelfMonitor); a drop
   is a pick credited to the person who stood there, a rise is a put-back or a
   refill. Written to `shelf_events` / `shelf_status`.
-- Theft: someone leaving with a picked can who never reached the counter
-  (UNPAID_EXIT), movement after closing (AFTER_HOURS_MOTION), a customer in the
-  staff-only area (RESTRICTED_ZONE_ENTRY). Saved with a photo, at most one per
-  type per SECURITY_ALERT_COOLDOWN_SECONDS (each walk-out is its own alert).
 """
 from __future__ import annotations
 
@@ -38,14 +33,10 @@ import numpy as np
 
 from src import clock
 from src.config import (
-    DATA_DIR,
     DEFAULT_CAMERA_INDEX,
     DOOR_LINE_Y,
-    ESP32_DEFAULT_STREAM_URL,
-    RESTRICTED_ZONE_BOX,
-    SECURITY_ALERT_COOLDOWN_SECONDS,
 )
-from src.database import log_footfall, log_security_event, log_shelf_event, log_visit, set_shelf_status
+from src.database import log_footfall, log_shelf_event, log_visit, set_shelf_status
 from src.shop_vision import (
     COUNTER_SECONDS,
     DemoShop,
@@ -62,8 +53,7 @@ from src.shop_vision import (
     to_px,
 )
 
-SNAPSHOT_DIR = DATA_DIR / "security_snapshots"
-SOURCE_LABELS = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}
+SOURCE_LABELS = {"webcam": "Webcam", "demo": "Demo shop"}
 BLUE = (235, 140, 60)
 LOST_JOURNEY_S = 600.0     # a customer the camera lost and never saw leaving is closed after 10 minutes
 PRESENCE_CONFIRM_S = 1.5   # "people in view" mode: in view this long = a visitor (not someone walking past)
@@ -169,21 +159,6 @@ YELLOW, RED, GREEN, WHITE, DARK = (74, 192, 245), (102, 112, 249), (128, 222, 74
 STAFF_COL = (220, 160, 90)     # staff boxes
 
 
-def _reachable(url: str, timeout: float = 2.0) -> bool:
-    """Quick TCP check so an offline ESP32 doesn't freeze the page for 30 s inside OpenCV."""
-    import socket
-    from urllib.parse import urlparse
-
-    u = urlparse(url)
-    if not u.hostname:
-        return False
-    try:
-        with socket.create_connection((u.hostname, u.port or 80), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
 @dataclass
 class Track:
     id: int
@@ -209,19 +184,17 @@ class Track:
 
 
 class StoreVisionEngine:
-    def __init__(self, source_type: str = "webcam", esp32_url: str = ESP32_DEFAULT_STREAM_URL,
-                 log_to_db: Optional[bool] = None):
+    def __init__(self, source_type: str = "webcam", log_to_db: Optional[bool] = None):
         if source_type == "synthetic":  # old name
             source_type = "demo"
         self.source_type = source_type
-        self.esp32_url = esp32_url or ESP32_DEFAULT_STREAM_URL
         self.data_source = "demo" if source_type == "demo" else "camera"   # how rows are tagged in the database
         self.log_to_db = True if log_to_db is None else bool(log_to_db)
         self.cap: Optional[cv2.VideoCapture] = None
         self.connected = False
         self.status_message = ""
 
-        # Zones: door line, counter, staff-only area, shelf slots (fractions of the picture)
+        # Zones: door line, counter, shelf slots (fractions of the picture)
         if source_type == "demo":
             self.layout = demo_layout(demo_products_from_db())
         else:
@@ -229,7 +202,7 @@ class StoreVisionEngine:
                 self.layout = load_layout()
             except Exception:  # noqa: BLE001 - no database yet
                 self.layout = {"door": {"y": DOOR_LINE_Y, "x1": 0.0, "x2": 1.0}, "counter": [0.04, 0.55, 0.40, 0.95],
-                               "staff_zone": list(RESTRICTED_ZONE_BOX), "shelves": []}
+                               "shelves": []}
         self.shelves = ShelfMonitor(self.layout.get("shelves", []))
         self.journeys: Dict[int, Journey] = {}           # track id -> customer inside the shop
         self.lost: List[Tuple[Journey, float]] = []       # customers the tracker lost, waiting to be seen leaving
@@ -250,10 +223,7 @@ class StoreVisionEngine:
 
         self.tracks: Dict[int, Track] = {}
         self.next_track_id = 1
-        self.last_alert_at: Dict[str, float] = {}
-        self.last_alert: Optional[Dict[str, Any]] = None
         self.latest_raw: Optional[np.ndarray] = None      # last clean frame (for zone set-up and calibration)
-        self.bg = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=32, detectShadows=True)
         self.frames_seen = 0
 
         # Faces: so someone close to the camera (at the counter) is still seen
@@ -295,14 +265,6 @@ class StoreVisionEngine:
     @door_line_y.setter
     def door_line_y(self, v: float) -> None:
         self.layout["door"]["y"] = float(v)
-
-    @property
-    def zone_box(self) -> List[float]:
-        return list(self.layout["staff_zone"])
-
-    @zone_box.setter
-    def zone_box(self, v) -> None:
-        self.layout["staff_zone"] = [float(x) for x in v]
 
     @property
     def count_mode(self) -> str:
@@ -376,28 +338,18 @@ class StoreVisionEngine:
             self.status_message = "Demo feed — a drawn scene, not a real camera. Numbers are examples and nothing is saved."
             return True
         self.close_stream()
-        if self.source_type == "esp32" and not _reachable(self.esp32_url):
-            self.connected = False
-            self.status_message = (f"Couldn't reach the ESP32-CAM at {self.esp32_url}. "
-                                   "Check it is powered and on the same Wi-Fi as this computer.")
-            return False
-        target = self.esp32_url if self.source_type == "esp32" else DEFAULT_CAMERA_INDEX
-        cap = cv2.VideoCapture(target)
+        cap = cv2.VideoCapture(DEFAULT_CAMERA_INDEX)
         if cap is not None and cap.isOpened():
             ok, frame = cap.read()
             if ok and frame is not None:
                 self.cap = cap
                 self.connected = True
-                self.status_message = f"{SOURCE_LABELS[self.source_type]} connected — counting and guard are active."
+                self.status_message = f"{SOURCE_LABELS[self.source_type]} connected — counting is active."
                 return True
             cap.release()
         self.connected = False
-        if self.source_type == "esp32":
-            self.status_message = (f"Couldn't reach the ESP32-CAM at {self.esp32_url}. "
-                                   "Check it is powered and on the same Wi-Fi as this computer.")
-        else:
-            self.status_message = ("No webcam found. On Streamlit Cloud the server can't see your laptop's camera — "
-                                   "run the app on the laptop, or use the browser camera below.")
+        self.status_message = ("No webcam found. On Streamlit Cloud the server can't see your laptop's camera — "
+                               "run the app on the laptop, or use the browser camera below.")
         return False
 
     # ---------------------------------------------------------------- background
@@ -480,7 +432,7 @@ class StoreVisionEngine:
 
     # ---------------------------------------------------------------- detection
     def detect_people(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Whole people (standing/walking). Used for door counting and the staff-only zone."""
+        """Whole people (standing/walking). Used for door counting."""
         if self.source_type == "demo":
             return list(self._demo_boxes)
         if self.hog is None:
@@ -697,17 +649,11 @@ class StoreVisionEngine:
                       j.reached_counter, j.shelves, picked, j.put_back, outcome,
                       counter_from=j.counter_from if j.reached_counter else None,
                       counter_to=j.counter_to if j.reached_counter else None)
-        words = {"reached_counter": "went to the counter", "browsed": "looked around", "unpaid_exit": "left with a can"}
+        words = {"reached_counter": "went to the counter", "browsed": "looked around", }
         stay_txt = f"{stay / 60:.0f} min" if stay >= 90 else f"{stay:.0f} s"
         self._event("visit", f"Customer left after {stay_txt} — {words.get(outcome, outcome)}"
                     + (f", took {picked} can{'s' if picked != 1 else ''}" if picked else "")
                     + (f", put back {j.put_back}" if j.put_back else ""))
-        if outcome == "unpaid_exit" and frame is not None:
-            items = ", ".join(f"{n} × {self.slot(sid).get('label') or self.slot(sid).get('name')} ({self.slot(sid).get('name')})"
-                              for sid, n in j.picks.items() if n > 0)
-            self._maybe_alert("UNPAID_EXIT", "Front door",
-                              f"Someone took {items} and left at {clock.fmt_time(now)} without going to the counter.",
-                              frame, now, key=f"UNPAID_EXIT:{id(j)}")
 
     def _adopt_lost(self, now_s: float) -> Optional[Journey]:
         """Someone leaving whom the tracker didn't see come in: most likely the customer it lost track of."""
@@ -716,7 +662,7 @@ class StoreVisionEngine:
         j, _ = self.lost.pop()          # most recently lost
         return j
 
-    def _update_journeys(self, frame: np.ndarray, people, now: datetime, now_s: float, after_hours: bool):
+    def _update_journeys(self, frame: np.ndarray, people, now: datetime, now_s: float):
         h, w = frame.shape[:2]
         for tr, direction in self._crossed:
             if direction == "in":
@@ -730,7 +676,7 @@ class StoreVisionEngine:
                     self._finish_visit(j, now, frame)
                 else:
                     self._event("door", "Someone left")
-        # customers the tracker lost long ago: close their visit without guessing theft
+        # customers the tracker lost long ago: close their visit
         keep = []
         for j, lost_at in self.lost:
             if now_s - lost_at > LOST_JOURNEY_S:
@@ -740,9 +686,8 @@ class StoreVisionEngine:
         self.lost = keep
 
         counter = to_px(self.layout["counter"], w, h)
-        staff = to_px(self.layout["staff_zone"], w, h)
         slots = [(s, to_px(s["box"], w, h)) for s in self.layout.get("shelves", [])]
-        at_counter, in_staff = 0, []
+        at_counter = 0
         presence = self.count_mode == "presence"
         for box, tid in zip(people, self._det_tracks):
             if self._is_staff_box(tid):
@@ -753,9 +698,6 @@ class StoreVisionEngine:
             at_ctr = presence or inside(ft, counter)        # a counter camera: everyone it sees is at the counter
             if at_ctr:
                 at_counter += 1
-            centre = (box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
-            if (inside(centre, staff) if presence else inside(ft, staff)) and (after_hours or (j is not None and not presence)):
-                in_staff.append(box)
             if j is None:
                 continue
             dt = min(1.0, max(0.0, now_s - getattr(tr, "_jt", now_s))) if tr is not None else 0.0
@@ -776,7 +718,7 @@ class StoreVisionEngine:
                         and overlap_frac(box, corners) >= 0.3:
                     j.near_since[s["id"]] = now_s
                     j.near_s[s["id"]] = j.near_s.get(s["id"], 0.0) + dt
-        return at_counter, in_staff
+        return at_counter
 
     def _update_shelves(self, frame: np.ndarray, people, now: datetime, now_s: float) -> None:
         if not self.shelves.slots:
@@ -817,36 +759,6 @@ class StoreVisionEngine:
                                      int(s.get("capacity", 4)), at=now.replace(tzinfo=None))
                     self._saved_shelves[s["id"]] = n
 
-    def _motion_fraction(self, frame: np.ndarray) -> float:
-        small = cv2.resize(frame, (320, int(320 * frame.shape[0] / frame.shape[1])))
-        fg = self.bg.apply(small)
-        fg = cv2.morphologyEx((fg == 255).astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        return float(fg.mean())
-
-    def _save_snapshot(self, frame: np.ndarray, kind: str, at: datetime) -> str:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        path = SNAPSHOT_DIR / f"{at.strftime('%Y%m%d_%H%M%S')}_{kind.lower()}.jpg"
-        cv2.imwrite(str(path), frame)
-        return str(path.relative_to(DATA_DIR.parent))
-
-    def _maybe_alert(self, kind: str, zone: str, details: str, frame: np.ndarray, at: datetime,
-                     key: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        now_s = time.time()
-        key = key or kind
-        if now_s - self.last_alert_at.get(key, 0.0) < SECURITY_ALERT_COOLDOWN_SECONDS:
-            return None
-        self.last_alert_at[key] = now_s
-        alert = {"type": kind, "zone": zone, "severity": "CRITICAL", "details": details, "saved": False}
-        if self.log_to_db:
-            photo = self._save_snapshot(frame, kind, at)
-            alert["details"] = f"{details} Photo: {photo}"
-            log_security_event(kind, zone, "CRITICAL", alert["details"], at=at.replace(tzinfo=None),
-                               source=self.data_source)
-            alert["saved"] = True
-        self.last_alert = alert
-        self._event("alert", details)
-        return alert
-
     # ---------------------------------------------------------------- main step
     def process_frame(self, frame: Optional[np.ndarray] = None) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
         """
@@ -859,7 +771,7 @@ class StoreVisionEngine:
         if frame is None:
             return None, {"connected": False, "status": self.status_message, "current_people": 0,
                           "entered": self.total_entered, "exited": self.total_exited,
-                          "is_after_hours": not clock.is_store_open(now), "security_alert": None,
+                          "is_after_hours": not clock.is_store_open(now),
                           "timestamp": now.strftime("%Y-%m-%d %H:%M:%S")}
         frame = frame.copy()
         raw = frame.copy()                      # shelves are read from the clean picture
@@ -886,38 +798,18 @@ class StoreVisionEngine:
                 log_footfall(count_in=entered, count_out=exited, at=now.replace(tzinfo=None), source=self.data_source)
         self.current_occupancy = max(0, self.total_entered - self.total_exited)
 
-        at_counter, in_staff = self._update_journeys(raw, people, now, now_s, after_hours)
+        at_counter = self._update_journeys(raw, people, now, now_s)
         self._update_shelves(raw, people + faces, now, now_s)
 
-        alert = None
-        motion = self._motion_fraction(frame) if self.source_type != "demo" else 0.0
-        warming_up = self.frames_seen < 15  # background model needs a few frames
-        customers_seen = [b for b, t in zip(people, self._det_tracks) if not self._is_staff_box(t)]
-        if after_hours and not warming_up and (motion > 0.015 or customers_seen or faces) and \
-                not (people and not customers_seen and not faces):          # only staff in view: closing up
-            alert = self._maybe_alert(
-                "AFTER_HOURS_MOTION", "Main store area",
-                f"Movement at {clock.fmt_time(now)} while the shop is closed.", raw, now) or alert
-        if in_staff:
-            alert = self._maybe_alert(
-                "RESTRICTED_ZONE_ENTRY", "Store room (staff only)",
-                f"A customer went into the staff-only area at {clock.fmt_time(now)}.", raw, now) or alert
-        if self.last_alert and alert is None and self.last_alert.get("_shown", 0) < 1:
-            alert = self.last_alert              # walk-out alerts raised while closing a visit
-            self.last_alert["_shown"] = 1
-
         # ---- overlays
-        zx1, zy1, zx2, zy2 = to_px(self.layout["staff_zone"], w, h)
         cx1, cy1, cx2, cy2 = to_px(self.layout["counter"], w, h)
         door = self.layout["door"]
         dx1, dx2 = int(door.get("x1", 0.0) * w), int(door.get("x2", 1.0) * w)
-        if not presence:            # a counter camera has no door line, counter box or staff area to show
+        if not presence:            # a counter camera has no door line or counter box to show
             cv2.line(frame, (dx1, line_y), (dx2, line_y), YELLOW, 2)
             _tag(frame, "Door line", dx1 + 4, line_y - 6, YELLOW)
             cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), BLUE, 2)
             _tag(frame, "Billing counter", cx1 + 2, cy1 + 18, BLUE)
-            cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), RED, 2)
-            _tag(frame, "Staff only", zx1 + 2, zy1 + 18, RED)
         counts = self.shelves.counts()
         for s_ in self.shelves.slots:
             sx1, sy1, sx2, sy2 = to_px(s_["box"], w, h)
@@ -938,7 +830,7 @@ class StoreVisionEngine:
             elif j is None:
                 colour, tag = (190, 190, 190), ("Person · checking…" if presence else "Person")
             elif j.net_picked and not j.reached_counter:
-                colour, tag = RED, f"Customer · {j.net_picked} can{'s' if j.net_picked != 1 else ''}"
+                colour, tag = GREEN, f"Customer · {j.net_picked} can{'s' if j.net_picked != 1 else ''}"
             elif presence:
                 secs = now_s - (tr.first_seen if tr else now_s)
                 colour, tag = GREEN, f"Customer · {secs / 60:.0f} min" if secs >= 90 else f"Customer · {secs:.0f} s"
@@ -946,8 +838,6 @@ class StoreVisionEngine:
                 colour, tag = BLUE, "Customer · at counter"
             else:
                 colour, tag = GREEN, "Customer"
-            if any(b == (x, y, bw, bh) for b in in_staff):
-                colour = RED
             cv2.rectangle(frame, (x, y), (x + bw, y + bh), colour, 2)
             _tag(frame, tag, x, y - 4, colour)
             box_tags.append(tag)
@@ -976,13 +866,11 @@ class StoreVisionEngine:
             "shelves": counts,
             "events": list(self.events[:12]),
             "is_after_hours": after_hours,
-            "security_alert": alert,
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
             # Boxes as fractions of the frame, for drawing over a live browser video
             "boxes": [{"x": x / w, "y": y / h, "w": bw / w, "h": bh / h, "label": t,
-                       "zone": any(b == (x, y, bw, bh) for b in in_staff),
                        "kind": "staff" if self._is_staff_box(tid) else "person"}
                       for (x, y, bw, bh), t, tid in zip(people, box_tags, self._det_tracks)]
-                     + [{"x": x / w, "y": y / h, "w": fw / w, "h": fh / h, "zone": False, "kind": "face"}
+                     + [{"x": x / w, "y": y / h, "w": fw / w, "h": fh / h, "kind": "face"}
                         for (x, y, fw, fh) in faces],
         }

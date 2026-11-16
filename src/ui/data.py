@@ -115,13 +115,6 @@ def cam_preorder(source: str, day_str: str):
     return si.preorder(source)
 
 
-@st.cache_data(ttl=CAM_TTL, show_spinner=False)
-def cam_theft(source: str, day_str: str):
-    from src import shop_insights as si
-
-    return si.theft(source)
-
-
 # --- AI sales forecast (refit at most every 10 minutes) ------------------------------
 FC_TTL = 600
 

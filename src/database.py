@@ -198,7 +198,7 @@ def ensure_demo_dates_current() -> int:
     """
     In demo mode, move every seeded date forward so the newest sale is today.
 
-    Expiry dates, purchase dates, sales, visitor logs, security events, camera
+    Expiry dates, purchase dates, sales, visitor logs, camera
     history AND the sample festival calendar all shift by the same number of
     days, so "expires in 23 days" stays true and the Diwali rush in the sample
     sales still lines up with Diwali in the calendar (the sales predictor
@@ -227,8 +227,6 @@ def ensure_demo_dates_current() -> int:
         cur.execute("UPDATE sales SET sale_timestamp = DATETIME(sale_timestamp, ?);", (mod,))
         # Only seeded rows move; what a real camera counted stays on its real day
         cur.execute("UPDATE footfall_logs SET timestamp = DATETIME(timestamp, ?) "
-                    "WHERE COALESCE(source, 'sample') = 'sample';", (mod,))
-        cur.execute("UPDATE security_events SET timestamp = DATETIME(timestamp, ?) "
                     "WHERE COALESCE(source, 'sample') = 'sample';", (mod,))
         try:   # seeded camera history moves with the sales it matches
             cur.execute("UPDATE visits SET entered_at = DATETIME(entered_at, ?), left_at = DATETIME(left_at, ?) "
@@ -610,38 +608,7 @@ def get_season_status(on_day: Optional[date] = None) -> Dict[str, Any]:
     }
 
 
-# --- Security events & visitor logging ----------------------------------------------
-
-def get_recent_security_events(limit: int = 10, include_demo: bool = False) -> pd.DataFrame:
-    """Newest first. Demo-feed events are left out unless asked for."""
-    where = "" if include_demo else "WHERE COALESCE(source, 'sample') != 'demo'"
-    with sqlite3.connect(DB_PATH) as conn:
-        return pd.read_sql_query(
-            f"SELECT * FROM security_events {where} ORDER BY timestamp DESC LIMIT ?;", conn, params=(limit,)
-        )
-
-
-def log_security_event(event_type: str, zone: str, severity: str, details: str, at: Optional[datetime] = None,
-                       source: str = "camera") -> int:
-    ts = (at or clock.now_naive()).strftime("%Y-%m-%d %H:%M:%S")
-    with get_connection() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO security_events (timestamp, event_type, zone, severity, status, details, source)
-            VALUES (?, ?, ?, ?, 'NEW', ?, ?);
-            """,
-            (ts, event_type, zone, severity, details, source),
-        )
-        conn.commit()
-        return cur.lastrowid
-
-
-def update_security_event_status(event_id: int, status: str) -> None:
-    """status: NEW, SEEN or FALSE_ALARM."""
-    with get_connection() as conn:
-        conn.execute("UPDATE security_events SET status = ? WHERE id = ?;", (status, int(event_id)))
-        conn.commit()
-
+# --- Visitor logging -------------------------------------------------------------------
 
 def log_footfall(count_in: int = 0, count_out: int = 0, occupancy: Optional[int] = None,
                  at: Optional[datetime] = None, source: str = "camera") -> None:
@@ -691,7 +658,7 @@ def log_footfall_entry(count_in: int, count_out: int, occupancy: int, dwell_mins
 # --- App tables (created on startup if missing) ----------------------------------
 
 # What the shop camera learns. `source` keeps the three kinds of data apart:
-#   'camera' = a real camera (webcam, ESP32-CAM, browser camera)
+#   'camera' = a real camera (webcam or browser camera)
 #   'demo'   = the drawn demo shop (examples only, cleared from the screen)
 #   'sample' = seeded history, so the screens have something to show on day one
 CAMERA_TABLES_SQL = """
@@ -705,7 +672,7 @@ CREATE TABLE IF NOT EXISTS visits (
     shelves TEXT,                          -- shelf slots visited, comma separated
     picked INTEGER NOT NULL DEFAULT 0,     -- cans taken off shelves (net of put-backs)
     put_back INTEGER NOT NULL DEFAULT 0,
-    outcome TEXT NOT NULL                  -- reached_counter | browsed | unpaid_exit
+    outcome TEXT NOT NULL                  -- reached_counter | browsed
 );
 CREATE INDEX IF NOT EXISTS ix_visits_src_day ON visits (source, entered_at);
 CREATE TABLE IF NOT EXISTS shelf_events (
@@ -771,11 +738,10 @@ def ensure_app_tables() -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(footfall_logs);").fetchall()]
         if "source" not in cols:   # older databases: tell camera counts apart from sample data
             conn.execute("ALTER TABLE footfall_logs ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
-        sec_cols = [r[1] for r in conn.execute("PRAGMA table_info(security_events);").fetchall()]
-        if "source" not in sec_cols:
-            conn.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
+        conn.execute("DROP TABLE IF EXISTS security_events;")      # the old theft/after-hours alerts (removed)
         ensure_base_columns(conn)
         conn.executescript(CAMERA_TABLES_SQL)
+        conn.execute("UPDATE visits SET outcome = 'browsed' WHERE outcome = 'unpaid_exit';")
         from src.billing import ensure_tables as _billing_tables
 
         _billing_tables(conn)                  # bills, stock moves, didn't-buys, barcodes; visit columns
@@ -900,7 +866,7 @@ def set_shelf_status(source: str, slot_id: str, slot_name: str, product_id: Opti
 def clear_camera_data(source: str) -> None:
     """Forget everything one source recorded (used for 'Clear demo run')."""
     with get_connection() as conn:
-        for table in ("visits", "shelf_events", "shelf_status", "security_events"):
+        for table in ("visits", "shelf_events", "shelf_status"):
             conn.execute(f"DELETE FROM {table} WHERE source = ?;", (source,))
         conn.execute("DELETE FROM footfall_logs WHERE source = ?;", (source,))
         conn.commit()

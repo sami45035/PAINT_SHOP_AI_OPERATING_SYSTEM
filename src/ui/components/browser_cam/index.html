@@ -42,7 +42,7 @@
   var octx = overlay.getContext("2d");
   var grab = document.createElement("canvas"), gctx = grab.getContext("2d");
   var stream = null, seq = 0, ack = 0, sentAt = 0, timer = null;
-  var args = { boxes: [], line: 0.68, zone: [0.62, 0.08, 0.96, 0.62], interval: 450, width: 480 };
+  var args = { boxes: [], line: 0.68, interval: 450, width: 480 };
   var btn = document.getElementById("start"), state = document.getElementById("state"), msg = document.getElementById("msg");
   var sel = document.getElementById("devices");
 
@@ -73,15 +73,10 @@
       octx.strokeStyle = "#F5C04A";
       octx.beginPath(); octx.moveTo(r.x + (args.door_x1 || 0) * r.w, ly); octx.lineTo(r.x + (args.door_x2 == null ? 1 : args.door_x2) * r.w, ly); octx.stroke();
       tag("Door line", r.x + 8, ly - 4, "#F5C04A");
-      // staff-only zone
-      var z = args.zone;
-      octx.strokeStyle = "#F97066";
-      octx.strokeRect(r.x + z[0] * r.w, r.y + z[1] * r.h, (z[2] - z[0]) * r.w, (z[3] - z[1]) * r.h);
-      tag("Staff only", r.x + z[0] * r.w + 4, r.y + z[1] * r.h + 20, "#F97066");
     }
     // people
     (args.boxes || []).forEach(function (b) {
-      var colour = b.kind === "staff" ? "#5AA0DC" : b.zone ? "#F97066" : ((b.label || "").indexOf("Customer") === 0 ? "#4ADE80" : "#C9CED6");
+      var colour = b.kind === "staff" ? "#5AA0DC" : ((b.label || "").indexOf("Customer") === 0 ? "#4ADE80" : "#C9CED6");
       octx.strokeStyle = colour;
       octx.strokeRect(r.x + b.x * r.w, r.y + b.y * r.h, b.w * r.w, b.h * r.h);
       tag(b.label || "Person", r.x + b.x * r.w, r.y + b.y * r.h - 4, colour);
@@ -167,7 +162,6 @@
     if (typeof a.ack === "number") ack = a.ack;
     if (a.boxes) args.boxes = a.boxes;
     if (typeof a.line === "number") args.line = a.line;
-    if (a.zone) args.zone = a.zone;
     if (a.mode) args.mode = a.mode;
     if (typeof a.door_x1 === "number") { args.door_x1 = a.door_x1; args.door_x2 = a.door_x2; }
     if (a.interval) args.interval = a.interval;

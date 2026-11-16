@@ -1,7 +1,7 @@
 """
 Seed script to initialize and populate SQLite database with realistic paint shop data.
 Creates suppliers, 100+ paint SKUs, batches, 180 days of sales transactions,
-hourly footfall logs, seasonal events, and security events.
+hourly footfall logs and seasonal events.
 """
 import os
 import sys
@@ -100,20 +100,6 @@ def init_db():
         count_out INTEGER NOT NULL,
         occupancy INTEGER NOT NULL,
         dwell_time_mins REAL NOT NULL,
-        source TEXT NOT NULL DEFAULT 'sample'
-    );
-    """)
-
-    # 6. Security Events Table
-    cursor.execute("""
-    CREATE TABLE security_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        zone TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        status TEXT NOT NULL,
-        details TEXT,
         source TEXT NOT NULL DEFAULT 'sample'
     );
     """)
@@ -466,48 +452,7 @@ def populate_database(conn):
     """, seasonal_data)
     conn.commit()
 
-    # 6. Populate Realistic Security Events
-    security_data = [
-        (
-            (today - timedelta(days=1, hours=2, minutes=17)).strftime("%Y-%m-%d 21:43:12"),
-            "AFTER_HOURS_MOTION",
-            "Main Showroom Floor",
-            "WARNING",
-            "VERIFIED",
-            "Movement detected at 9:43 PM (Shop closed at 9:00 PM). Verified as night cleaning staff."
-        ),
-        (
-            (today - timedelta(days=3, hours=5)).strftime("%Y-%m-%d 18:31:05"),
-            "RESTRICTED_ZONE_ENTRY",
-            "High-Value Tinting Storage",
-            "CRITICAL",
-            "RESOLVED",
-            "Unauthorized entry into pigment formulation zone during busy footfall period."
-        ),
-        (
-            (today - timedelta(days=5, hours=10)).strftime("%Y-%m-%d 02:15:40"),
-            "CAMERA_DISCONNECTED",
-            "Rear Gate Camera",
-            "CRITICAL",
-            "RESOLVED",
-            "Stream heartbeat interrupted for 42 minutes. Reconnected after Wi-Fi router reboot."
-        ),
-        (
-            (today - timedelta(days=8, hours=1)).strftime("%Y-%m-%d 22:10:00"),
-            "AFTER_HOURS_MOTION",
-            "Storage Backdoor",
-            "CRITICAL",
-            "VERIFIED",
-            "Movement logged near stock loading dock after store closing."
-        )
-    ]
-    cursor.executemany("""
-    INSERT INTO security_events (timestamp, event_type, zone, severity, status, details)
-    VALUES (?, ?, ?, ?, ?, ?);
-    """, security_data)
-    conn.commit()
-
-    # 7. Sample shop-camera history (visits, shelf picks, walk-outs) matching the sales above
+    # 7. Sample shop-camera history (visits, shelf picks) matching the sales above
     from seed_camera import seed_camera_history
     n_visits = seed_camera_history(conn)
 
@@ -525,7 +470,6 @@ def populate_database(conn):
     print(f"Total Products: {len(products_inserted)}")
     print(f"Total Sales Records: {cursor.execute('SELECT COUNT(*) FROM sales;').fetchone()[0]}")
     print(f"Total Footfall Logs: {cursor.execute('SELECT COUNT(*) FROM footfall_logs;').fetchone()[0]}")
-    print(f"Total Security Events: {cursor.execute('SELECT COUNT(*) FROM security_events;').fetchone()[0]}")
     conn.close()
 
 def build(path) -> None:

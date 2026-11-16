@@ -141,9 +141,8 @@ def tool_recommend_colour(query: str) -> str:
 
 
 def tool_camera_summary(topic: str = "all") -> str:
-    """What the shop camera saw: buyers, shelves, fast movers, theft."""
+    """What the shop camera saw: buyers, shelves, fast movers."""
     from src import shop_insights as si
-    from src.formatting import rupees
 
     src = si.best_source()
     note = "" if src == "camera" else " *(sample camera history)*"
@@ -173,10 +172,6 @@ def tool_camera_summary(topic: str = "all") -> str:
             out.append("**Fastest movers this week:** " + ", ".join(f"{r.label} ({int(r.units)} cans)" for r in top.itertuples()))
         for h in fm["hesitant"][:1]:
             out.append(f"**Picked up but not bought:** {h['label']} — {h['message']}")
-    if topic in ("all", "theft"):
-        th = si.theft(src)
-        out.append(f"**Theft checks:** {th['walkouts_today']} walk-out(s) with a can today, {th['open']} alert(s) to check this week"
-                   + (f", shelf-vs-till gap {rupees(th['unbilled_value'])} today." if th["unbilled_value"] else "."))
     return "\n".join(out)
 
 
@@ -195,8 +190,6 @@ def deterministic_assistant_response(user_message: str) -> str:
     if any(k in msg for k in ("running low", "run out", "running out", "low stock", "low on", "reorder", "order", "restock")) \
             or re.search(r"\blow\b", msg):
         return tool_get_urgent_restock()
-    if any(k in msg for k in ("theft", "steal", "stolen", "shoplift", "walk out", "walk-out", "unpaid", "security")):
-        return tool_camera_summary("theft")
     if any(k in msg for k in ("shelf", "shelves", "refill")):
         return tool_camera_summary("shelves")
     if any(k in msg for k in ("fast mov", "fast-mov", "best sell", "moving", "picked up", "put back")):
@@ -217,7 +210,7 @@ def deterministic_assistant_response(user_message: str) -> str:
         "- **Reorders** — *What should I order today?*\n"
         "- **Alerts** — *What needs attention?*\n"
         "- **Today's numbers** — *How did we do today?*\n"
-        "- **Camera** — *How many customers bought today? Which shelf needs refilling? Any theft?*\n"
+        "- **Camera** — *How many customers bought today? Which shelf needs refilling?*\n"
         "- **Colours** — *Suggest a calm bedroom colour*"
     )
 

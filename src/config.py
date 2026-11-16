@@ -42,11 +42,8 @@ CONVERSION_LOOKBACK_DAYS = 14
 
 # Camera & Vision Configuration
 DEFAULT_CAMERA_INDEX = 0            # Laptop/USB webcam
-ESP32_DEFAULT_STREAM_URL = os.getenv("ESP32_STREAM_URL", "http://192.168.1.100:81/stream")
 PERSON_CONFIDENCE_THRESHOLD = 0.5
-RESTRICTED_ZONE_BOX = [0.68, 0.10, 0.96, 0.58]  # [x_min, y_min, x_max, y_max] normalised (storage room)
 DOOR_LINE_Y = 0.68                  # Normalised height of the virtual door line
-SECURITY_ALERT_COOLDOWN_SECONDS = 60  # At most one saved alert per type per minute
 
 # Colour Studio — wall segmentation model (ONNX, runs on CPU)
 WALL_MODEL_REPO = os.getenv("WALL_MODEL_REPO", "Xenova/segformer-b3-finetuned-ade-512-512")

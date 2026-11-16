@@ -1,6 +1,6 @@
 """
 Shop camera tests — one section per job the camera does:
-footfall, buyers, theft, fast movers, shelf stock / pre-order.
+footfall, buyers, fast movers, shelf stock / pre-order.
 
 Runs on a temporary copy of the sample database, moved forward to today.
 """
@@ -79,9 +79,7 @@ class TestDemoShopStory(unittest.TestCase):
         db.clear_camera_data("demo")
         cls.visitors_before = db.get_sales_summary(30)["today_visitors"]
         t = [1000.0]
-        with mock.patch.object(cs.time, "time", side_effect=lambda: t[0]), \
-                mock.patch.object(cs.StoreVisionEngine, "_save_snapshot", lambda *a, **k: "snap.jpg"), \
-                Frozen(15):
+        with mock.patch.object(cs.time, "time", side_effect=lambda: t[0]), Frozen(15):
             eng = cs.StoreVisionEngine("demo")
             eng._demo_t0 = 1000.0
             eng.open_stream()
@@ -93,39 +91,31 @@ class TestDemoShopStory(unittest.TestCase):
             cls.visits = c.execute("SELECT outcome, reached_counter, picked, put_back, shelves FROM visits "
                                    "WHERE source = 'demo' ORDER BY id;").fetchall()
             cls.events = c.execute("SELECT slot_id, kind, qty FROM shelf_events WHERE source = 'demo' ORDER BY id;").fetchall()
-            cls.security = c.execute("SELECT event_type, details FROM security_events WHERE source = 'demo';").fetchall()
             cls.door = c.execute("SELECT SUM(count_in), SUM(count_out) FROM footfall_logs WHERE source = 'demo';").fetchone()
 
     def test_footfall(self):
-        self.assertEqual(tuple(self.door), (4, 4))                    # buyer, browser, walk-out, enquiry
+        self.assertEqual(tuple(self.door), (4, 4))                    # buyer, browser, looker, enquiry
         self.assertEqual(self.m["inside_now"], 0)
 
     def test_staff_coming_from_the_store_room_is_not_a_visitor(self):
         self.assertEqual(len(self.visits), 4)
 
-    def test_buyer_browser_walkout_enquiry(self):
+    def test_buyer_browser_looker_enquiry(self):
         outcomes = [v[0] for v in self.visits]
-        self.assertEqual(outcomes, ["reached_counter", "browsed", "unpaid_exit", "reached_counter"])
-        buyer, browser, walkout, enquiry = self.visits
+        self.assertEqual(outcomes, ["reached_counter", "browsed", "browsed", "reached_counter"])
+        buyer, browser, looker, enquiry = self.visits
         self.assertEqual(buyer[2], 1)                  # took the Royale Blue it paid for
         self.assertEqual((browser[2], browser[3]), (0, 1))   # picked up and put back
-        self.assertEqual(walkout[2], 1)
-        self.assertIn("B1", walkout[4])
+        self.assertEqual(looker[2], 0)                 # looked at Warm Beige, took nothing
+        self.assertIn("B1", looker[4])
         self.assertEqual((enquiry[2], enquiry[4]), (0, ""))
 
     def test_shelf_events(self):
-        self.assertEqual(self.events, [("B2", "pick", 1), ("A2", "pick", 1), ("A2", "put_back", 1), ("B1", "pick", 1),
-                                       ("B1", "restock", 1), ("B2", "restock", 1)])
-
-    def test_walkout_raises_one_alert_naming_the_can(self):
-        self.assertEqual(len(self.security), 1)
-        kind, details = self.security[0]
-        self.assertEqual(kind, "UNPAID_EXIT")
-        self.assertIn("Warm Beige 4 L", details)
+        self.assertEqual(self.events, [("B2", "pick", 1), ("A2", "pick", 1), ("A2", "put_back", 1),
+                                       ("B2", "restock", 1)])
 
     def test_demo_never_counts_as_real(self):
         self.assertEqual(db.get_sales_summary(30)["today_visitors"], self.visitors_before)
-        self.assertFalse((db.get_recent_security_events(50)["source"] == "demo").any())
 
     def test_shelf_counts_match_the_drawing(self):
         truth = self.eng.demo_shop.cans_at(65.75 % 64)
@@ -383,17 +373,6 @@ class TestInsights(unittest.TestCase):
             elif not o["watched"]:
                 self.assertEqual(o["camera_factor"], 1.0)
 
-    def test_walkout_today_shows_as_shelf_vs_till_gap(self):
-        from src import shop_insights as si
-
-        with Frozen(20, 30):
-            th = si.theft("sample")
-        self.assertEqual(th["walkouts_today"], 1)
-        self.assertIn("Royale Blue 4 L", [g["label"] for g in th["shelf_vs_till"]])
-        with Frozen(10, 40):                       # 3 minutes after the walk-out: still in the 45-minute grace
-            th = si.theft("sample")
-        self.assertEqual(th["shelf_vs_till"], [])
-
     def test_alerts_and_refill_action(self):
         from src import shop_insights as si
         from src.smart_alerts import generate_smart_alerts
@@ -401,7 +380,8 @@ class TestInsights(unittest.TestCase):
         with Frozen(20, 30):
             cam = generate_smart_alerts()["camera"]
             types = {a["type"] for a in cam}
-            self.assertTrue({"REFILL_SHELF", "UNPAID_EXIT", "SHELF_TILL_GAP", "PICKED_NOT_BOUGHT"} <= types)
+            self.assertTrue({"REFILL_SHELF", "PICKED_NOT_BOUGHT"} <= types)
+            self.assertFalse({"UNPAID_EXIT", "SHELF_TILL_GAP"} & types)
             refill = next(a for a in cam if a["type"] == "REFILL_SHELF")
             before = si.shelves("sample").set_index("slot_id").loc[refill["slot_id"], "cans"]
             db.log_shelf_event("sample", refill["slot_id"], refill["product_id"], "restock", refill["move"],
@@ -417,7 +397,6 @@ class TestAuraCamera(unittest.TestCase):
         from src.ai_assistant import deterministic_assistant_response as ask
 
         self.assertIn("came in", ask("How many customers bought today?"))
-        self.assertIn("Theft checks", ask("Any theft today?"))
         self.assertTrue("Refill" in ask("Which shelf needs refilling?") or "stocked" in ask("Which shelf needs refilling?"))
 
 

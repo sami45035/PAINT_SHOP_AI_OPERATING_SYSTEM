@@ -30,7 +30,7 @@ import streamlit as st  # noqa: E402
 st.set_page_config(page_title="Apex Paint AI", page_icon="🎨", layout="wide", initial_sidebar_state="auto")   # open on a laptop, closed on a phone
 
 from src import clock  # noqa: E402
-from src.config import DEMO_MODE, ESP32_DEFAULT_STREAM_URL, STORE_SHORT_NAME  # noqa: E402
+from src.config import DEMO_MODE, STORE_SHORT_NAME  # noqa: E402
 from src.ui import data, nav  # noqa: E402
 from src.safety import guard, last_errors  # noqa: E402
 from src.ui.theme import html, inject_css  # noqa: E402
@@ -153,7 +153,7 @@ with st.sidebar:
         st.page_link(page, label=label, icon=page.icon)
 
     st.divider()
-    cam = {"webcam": "Webcam", "esp32": "ESP32-CAM", "demo": "Demo shop"}.get(st.session_state.get("cam_source", "demo"), "—")
+    cam = {"webcam": "Webcam", "demo": "Demo shop"}.get(st.session_state.get("cam_source", "demo"), "—")
     gem = bool(st.session_state.get("gemini_key") or os.getenv("GEMINI_API_KEY"))
     aura = "Gemini" if gem and st.session_state.get("aura_mode") == "Gemini" else "Offline mode"
     now = clock.now()
@@ -165,8 +165,6 @@ with st.sidebar:
     with st.expander("Settings"):
         st.text_input("Gemini API key", type="password", key="gemini_key",
                       help="Optional. Lets Aura answer free-form questions. Stays in this browser session.")
-        st.session_state.setdefault("esp32_url", ESP32_DEFAULT_STREAM_URL)
-        st.text_input("ESP32-CAM stream address", key="esp32_url")
         if st.button("Refresh data", use_container_width=True):
             data.clear_all()
             st.rerun()

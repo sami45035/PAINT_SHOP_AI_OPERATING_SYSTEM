@@ -270,10 +270,9 @@ class TestLayer5Camera(unittest.TestCase):
 
         t = [1000.0]
         with mock.patch.object(cs.time, "time", side_effect=lambda: t[0]), \
-                mock.patch.object(cs, "log_footfall") as lf, mock.patch.object(cs, "log_security_event") as ls, \
+                mock.patch.object(cs, "log_footfall") as lf, \
                 mock.patch.object(cs, "log_visit"), mock.patch.object(cs, "log_shelf_event"), \
-                mock.patch.object(cs, "set_shelf_status"), \
-                mock.patch.object(cs.StoreVisionEngine, "_save_snapshot", lambda *a, **k: "x.jpg"):
+                mock.patch.object(cs, "set_shelf_status"):
             eng = cs.StoreVisionEngine("demo")
             eng._demo_t0 = 1000.0
             self.assertTrue(eng.open_stream())
@@ -284,7 +283,6 @@ class TestLayer5Camera(unittest.TestCase):
             self.assertGreaterEqual(m["exited"], 1)
             self.assertTrue(lf.called)
             self.assertTrue(all(c.kwargs.get("source") == "demo" for c in lf.call_args_list))
-            self.assertTrue(all(c.kwargs.get("source") == "demo" for c in ls.call_args_list))
 
     def test_standing_on_the_line_is_not_counted_again_and_again(self):
         from src.camera_stream import StoreVisionEngine
@@ -323,26 +321,16 @@ class TestLayer5Camera(unittest.TestCase):
         self.assertEqual(total, 0)
 
     def test_missing_camera_is_reported(self):
-        from src.camera_stream import StoreVisionEngine
+        import src.camera_stream as cs
 
-        eng = StoreVisionEngine("esp32", "http://10.255.255.1:81/stream")
-        self.assertFalse(eng.open_stream())
+        closed = mock.MagicMock()
+        closed.isOpened.return_value = False
+        with mock.patch.object(cs.cv2, "VideoCapture", return_value=closed):
+            eng = cs.StoreVisionEngine("webcam")
+            self.assertFalse(eng.open_stream())
         frame, m = eng.process_frame()
         self.assertIsNone(frame)
         self.assertFalse(m["connected"])
-
-    def test_alert_cooldown(self):
-        import src.camera_stream as cs
-
-        with mock.patch.object(cs, "log_security_event") as ls:
-            eng = cs.StoreVisionEngine("webcam", log_to_db=True)
-            eng._save_snapshot = lambda *a, **k: "data/security_snapshots/x.jpg"
-            frame = np.zeros((240, 320, 3), np.uint8)
-            first = eng._maybe_alert("AFTER_HOURS_MOTION", "Main", "x", frame, clock.now())
-            second = eng._maybe_alert("AFTER_HOURS_MOTION", "Main", "x", frame, clock.now())
-            self.assertIsNotNone(first)
-            self.assertIsNone(second)
-            self.assertEqual(ls.call_count, 1)
 
 
 # --------------------------------------------------------------------- Layer 6

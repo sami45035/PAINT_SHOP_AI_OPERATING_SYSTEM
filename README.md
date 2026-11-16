@@ -1,5 +1,5 @@
 # Paint Shop AI — Apex Colors & Paints Studio
-> An AI assistant for independent paint shops: stock the right paint, stop waste and theft, and serve customers faster.
+> An AI assistant for independent paint shops: stock the right paint, stop waste, and serve customers faster.
 > Real-time prototype built layer by layer.
 
 ---
@@ -15,7 +15,7 @@
 | **Scan & Bill** | Scan the can, print the bill — stock goes down by one at the same moment. Who bought, who didn't, and why? | L1 data · L5 |
 | **Stock & Reorder** (+ Deal Checker) | What should I order, how much, and by when? Is this supplier offer worth it? | L3 |
 | **Alerts** | What needs my attention right now? | L4 |
-| **Store Camera** | How many came in, how many bought, what's on the shelves, what moves fast, did anything leave unpaid? | L5 |
+| **Store Camera** | How many came in, how many bought, what's on the shelves, what moves fast? | L5 |
 | **Ask Aura** | Ask anything about the shop in plain words | L7 |
 
 ## Architecture
@@ -26,7 +26,7 @@
 | 2 · Overview | `src/ui/pages/overview.py`, `src/dashboard_views.py` | KPIs, sales trend, visitors vs bills by hour. Conversion = bills ÷ visitors for the day. |
 | 3 · AI sales forecast & reorder | `src/sales_forecast.py`, `src/predictor.py` | Per product group, a ridge regression on six months of daily sales learns the weekday pattern, the real effect of each festival in the calendar (the calendar's multiplier is only a starting guess) and the trend; forecasts are split across products by recent share. Backtested against the simple 30-day average on periods it never saw. Reorder quantities and dates use the same forecast, with supplier lead time and minimum order. |
 | 4 · Alerts | `src/smart_alerts.py` | Running out before the supplier can deliver, batches expiring within 45 days, money stuck in slow sellers, days with many visitors but few bills. |
-| 5 · Store Camera | `src/camera_stream.py`, `src/shop_vision.py`, `src/shop_insights.py` | The camera as a data source. People detection (HOG) and tracking; door-line footfall; each customer's journey (shelves visited, cans taken / put back, reached the counter); can counting on shelf slots; walk-out (unpaid can) alerts; insights that join all of it with sales, stock and the forecast. |
+| 5 · Store Camera | `src/camera_stream.py`, `src/shop_vision.py`, `src/shop_insights.py` | The camera as a data source. People detection (HOG) and tracking; door-line footfall; each customer's journey (shelves visited, cans taken / put back, reached the counter); can counting on shelf slots; insights that join all of it with sales, stock and the forecast. |
 | 6 · Colour Studio | `src/colour_studio/` | SegFormer (ADE20K) via ONNX Runtime finds walls and separates them from ceiling, doors, windows and furniture; walls are split at corners; light-preserving recolouring in linear RGB; in-browser brush touch-ups; **designer looks** (whole 60-30-10 schemes scored against the room) shown on the customer's own walls; paint quantity planner. |
 | 7 · Ask Aura | `src/ai_assistant.py` | Gemini (optional) grounded in live shop data, with an offline mode for common questions. |
 
@@ -178,28 +178,25 @@ The camera answers five questions, each joined with the till and the stock book:
 |---|---|---|
 | **Footfall** — how many came in, when? | Feet crossing the door line (downward = in). Only crossings through the doorway count. | Visitors & buyers |
 | **Buyers** — how many actually bought? | Each bill saved in **Scan & Bill** is matched to the customer standing at the counter when it was saved; people who came in with them share it. A *Didn't buy* tap (price, not in stock, just asking, will come back) goes to the customer at the counter without a bill. So each visit is *bought* or *didn't buy — because…*. Without bills from the app it falls back to bills ÷ visitors. | Visitors & buyers |
-| **Theft** | A can leaves a shelf while someone stands there, and that person leaves without reaching the counter → *Left with an unpaid can* alert with a photo. Cans taken off shelves are also checked against the day's bills (*shelf vs till*). Plus after-hours movement and customers in the staff-only area. | Theft & safety, Alerts |
 | **Fast movers** | Fastest sellers from the till, plus for watched shelves how often each can is picked up and put back. *Picked up, not bought* and *demand building* are flagged. | Shelves & fast movers |
 | **Shelf stock → pre-order** | Cans counted on each shelf slot from the picture. Low shelf + cans in the store room → *Refill now*. The forecast decides what to order; for watched products the camera's pick-up trend sizes the order up or down. | Shelves & fast movers, Alerts |
 
 **Counting at a laptop or counter camera** (*people in view*): someone in view for about 1.5 s is a visitor. Someone who drops out of view — looking down at a phone, turning away, a hand over the face, stepping out of the picture — is kept on a *stepped away* list for 90 s; if a person of the same size and shirt colour appears in that time, it's the same visit continuing, not a new visitor. Gone longer, they're counted as left at the time they were last seen. (Before this, one person at a webcam who kept looking down was counted again each time.)
 
-**Staff uniform** (Set up tab): switch on *Staff wear a uniform* and pick the colour — or press **Capture from the camera** while a staff member stands in front of it. Anyone wearing it for about a second is tagged *Staff · not counted*: not a visitor, not matched to bills, no store-room alert. A bright colour customers rarely wear works best (orange vs yellow is told apart; a dull or dark colour gets a warning). Each person is also told apart by shirt colour, so the next customer stepping into the same spot isn't mistaken for the one who just left.
+**Staff uniform** (Set up tab): switch on *Staff wear a uniform* and pick the colour — or press **Capture from the camera** while a staff member stands in front of it. Anyone wearing it for about a second is tagged *Staff · not counted*: not a visitor and not matched to bills. A bright colour customers rarely wear works best (orange vs yellow is told apart; a dull or dark colour gets a warning). Each person is also told apart by shirt colour, so the next customer stepping into the same spot isn't mistaken for the one who just left.
 
 **Tested end to end** (`tests/test_e2e_counter.py`): scripted scenes with drawn people go through the real detector, tracker, uniform check, visits and billing — a counter camera (buyer, staff, "just asking", passer-by), a busy counter (a couple shares a bill while a stranger who came later doesn't), and a doorway camera. `tests/browser/run_e2e.py` runs the real app in two browsers with fake cameras (laptop on Store Camera, phone on Scan & Bill); `.github/workflows/e2e.yml` runs it on GitHub.
 
 **Data sources.** Rows are tagged `camera` (a real camera), `demo` (the drawn demo shop) or `sample` (30 days of history built to match the sample sales, so the screens show something on day one). Demo numbers never count as real visitors. `python data/seed_camera.py` adds the sample history to an older database.
 
-**Demo shop.** A drawn shop on a 64-second loop, read by the same code as a real camera: a buyer, a browser who puts a can back, a walk-out (alert), an enquiry, and staff refilling shelves from the store room (staff aren't counted as visitors).
+**Demo shop.** A drawn shop on a 64-second loop, read by the same code as a real camera: a buyer, a browser who puts a can back, someone who looks and leaves, an enquiry, and staff refilling shelves from the store room (staff aren't counted as visitors).
 
-**Set up a real camera** (Set up tab): tap two points for the door line, two corners for the billing counter and the staff-only area, and two corners around each shelf slot (one product per slot, cans side by side facing the camera). Save, then **Calibrate** with the shelves as they are.
+**Set up a real camera** (Set up tab): tap two points for the door line, two corners for the billing counter, and two corners around each shelf slot (one product per slot, cans side by side facing the camera). Save, then **Calibrate** with the shelves as they are.
 
 **Where the camera is read**
 - **Webcam, app running on your laptop:** the app reads it directly (~8 frames a second).
 - **Webcam, app on Streamlit Cloud:** the browser streams it — press **Start camera** and allow access (~2 frames a second; keep the tab open).
-- **ESP32-CAM:** flash the CameraWebServer example, join the shop Wi-Fi, put the stream address (e.g. `http://192.168.1.100:81/stream`) in **Settings**. The ESP32 must be reachable from where the app runs (so run the app on a laptop or mini PC in the shop).
-
-Alert photos are saved to `data/security_snapshots/`.
+- **A shop PC with a USB camera:** run the app on that PC and choose **Webcam**.
 
 ## Gemini (optional)
 

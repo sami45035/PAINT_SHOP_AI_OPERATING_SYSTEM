@@ -60,7 +60,7 @@ def wall_brush(*, key: str, photo_key: str, orig_url: str, painted_url: str, bas
     })
 
 
-def browser_cam(*, key: str, ack: int, boxes, line: float, zone, interval_ms: int = 450, width: int = 480,
+def browser_cam(*, key: str, ack: int, boxes, line: float, interval_ms: int = 450, width: int = 480,
                 mode: str = "door", door_x=(0.0, 1.0)):
     """
     Live camera in the visitor's browser (works on Streamlit Cloud). Sends a small
@@ -68,7 +68,7 @@ def browser_cam(*, key: str, ack: int, boxes, line: float, zone, interval_ms: in
     `ack` = last seq processed, so the browser never queues frames faster than we can count.
     """
     return _component("browser_cam")(key=key, default=None, ack=int(ack), boxes=boxes or [], line=float(line),
-                                     zone=[float(v) for v in zone], interval=int(interval_ms), width=int(width),
+                                     interval=int(interval_ms), width=int(width),
                                      mode=mode, door_x1=float(door_x[0]), door_x2=float(door_x[1]))
 
 

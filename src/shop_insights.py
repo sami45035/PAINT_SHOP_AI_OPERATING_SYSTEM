@@ -2,15 +2,14 @@
 Shop insights from the camera (Layer 5 → business answers).
 
 Everything here joins what the camera saw (visits, shelf picks, shelf counts,
-door counts, security events) with the till (sales), the stock book
+door counts) with the till (sales), the stock book
 (inventory) and the forecast (predictor). Each function answers one of the
-five questions the camera is for:
+four questions the camera is for:
 
 1. footfall()          How many people came in, when?
 2. buyers()            How many of them actually bought? Where do we lose them?
-3. theft()             Did anything leave without being paid for?
-4. fast_movers()       What moves fastest — and what do people pick up but not buy?
-5. shelves(), preorder()  Which shelf needs refilling now, what must be ordered?
+3. fast_movers()       What moves fastest — and what do people pick up but not buy?
+4. shelves(), preorder()  Which shelf needs refilling now, what must be ordered?
 
 `source` is 'camera' (a real camera), 'demo' (the drawn demo shop) or
 'sample' (seeded history). Nothing after "now" is counted.
@@ -167,7 +166,6 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     at_shelves = int((v["shelves"].fillna("") != "").sum()) if finished else 0
     at_counter = int(v["reached_counter"].sum()) if finished else 0
     bills = int(len(sales)) if real_till else None
-    walkouts = int((v["outcome"] == "unpaid_exit").sum()) if finished else 0
     left_without_counter = finished - at_counter
     avg_bill = float(sales["amount"].mean()) if real_till and len(sales) else None
 
@@ -215,7 +213,7 @@ def buyers(source: str, day: Optional[date] = None) -> Dict[str, Any]:
         "bought_visit_pct": round(bought_visits / finished * 100, 1) if finished else None,
         "visitors": visitors, "finished_visits": finished, "at_shelves": at_shelves, "at_counter": at_counter,
         "bills": bills, "bought_pct": round(rate * 100, 1) if rate is not None else None,
-        "left_without_counter": left_without_counter, "walkouts": walkouts, "avg_bill": avg_bill,
+        "left_without_counter": left_without_counter, "avg_bill": avg_bill,
         "weak_hours": weak, "missed_bills": missed,
         "missed_value": round(missed * avg_bill) if (missed and avg_bill) else 0,
         "hourly": hourly, "real_till": real_till, "since": since,
@@ -306,7 +304,7 @@ def interest(source: str, days: int = 7, day: Optional[date] = None) -> pd.DataF
     return pd.DataFrame(rows)
 
 
-# ----------------------------------------------------------------------------- 4. fast movers
+# ----------------------------------------------------------------------------- 3. fast movers
 
 def fast_movers(source: str, days: int = 7, limit: int = 8, day: Optional[date] = None) -> Dict[str, Any]:
     """
@@ -350,7 +348,7 @@ def fast_movers(source: str, days: int = 7, limit: int = 8, day: Optional[date] 
     return {"top": top, "hesitant": hesitant, "rising": rising, "watched": cam}
 
 
-# ----------------------------------------------------------------------------- 5. shelves → refill & pre-order
+# ----------------------------------------------------------------------------- 4. shelves → refill & pre-order
 
 def preorder(source: str, day: Optional[date] = None) -> Dict[str, Any]:
     """
@@ -419,59 +417,3 @@ def preorder(source: str, day: Optional[date] = None) -> Dict[str, Any]:
         })
     order.sort(key=lambda o: (o["level"] != "act_now", not o["watched"], o["days_left"]))
     return {"refill": refill, "order": order}
-
-
-# ----------------------------------------------------------------------------- 3. theft
-
-PAY_GRACE_MIN = 45          # a picked can is "on its way to the counter" this long
-
-
-def theft(source: str, day: Optional[date] = None, days: int = 7) -> Dict[str, Any]:
-    """
-    - Walk-outs: someone took a can and left without reaching the counter.
-    - Shelf vs till: cans that left the watched shelves today (picked, not put
-      back) compared with what the till sold of those products today. More gone
-      than sold = cans that may have left unpaid (or were moved without a note).
-    - After-hours movement and staff-only area entries.
-    """
-    ds, now = _ds(day), _now()
-    since = (datetime.strptime(ds, "%Y-%m-%d") - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-    sec = _q("SELECT * FROM security_events WHERE COALESCE(source,'sample') = ? AND DATE(timestamp) >= ? "
-             "AND timestamp <= ? ORDER BY timestamp DESC;", (source, since, now))
-    start = ds + " 00:00:00"
-    # A can picked in the last 45 minutes may still be with a customer who hasn't paid yet (paint customers
-    # compare shades and wait for tinting): picks in that window the till hasn't billed yet get the benefit
-    # of the doubt. A can leaving through the door unpaid is alerted at once by the walk-out check anyway.
-    grace = (clock.now_naive() - timedelta(minutes=PAY_GRACE_MIN)).strftime("%Y-%m-%d %H:%M:%S")
-    ev = _shelf_events(source, start, now)
-    gap = []
-    if not ev.empty:
-        pids = sorted(set(int(p) for p in ev["product_id"].dropna()))
-        sold = _q(f"SELECT product_id, SUM(quantity) AS sold, SUM(CASE WHEN sale_timestamp > ? THEN quantity ELSE 0 END) "
-                  f"AS sold_recent FROM sales WHERE sale_timestamp > ? AND sale_timestamp <= ? "
-                  f"AND product_id IN ({','.join('?' * len(pids))}) GROUP BY product_id;", (grace, start, now, *pids))
-        for pid, g in ev.groupby("product_id"):
-            net = lambda d: int(d.loc[d["kind"] == "pick", "qty"].sum() - d.loc[d["kind"] == "put_back", "qty"].sum())
-            taken, taken_recent = net(g), net(g[g["at"] > grace])
-            s_ = sold[sold["product_id"] == pid]
-            n_sold = int(s_["sold"].iloc[0]) if not s_.empty else 0
-            sold_recent = int(s_["sold_recent"].iloc[0]) if not s_.empty else 0
-            if source == "demo":
-                n_sold = sold_recent = 0       # no till in the demo shop
-            pending = max(0, taken_recent - sold_recent)
-            missing = taken - n_sold - pending
-            if missing > 0:
-                r = g.iloc[0]
-                gap.append({"product_id": int(pid), "label": product_label(r), "taken": taken, "sold": n_sold,
-                            "missing": int(missing), "value": float(missing * (r["selling_price"] or 0))})
-    walkouts = sec[sec["event_type"] == "UNPAID_EXIT"] if not sec.empty else sec
-    return {
-        "events": sec,
-        "walkouts": walkouts,
-        "walkouts_today": int((walkouts["timestamp"].str[:10] == ds).sum()) if not walkouts.empty else 0,
-        "open": int((sec["status"] == "NEW").sum()) if not sec.empty else 0,
-        "after_hours": int((sec["event_type"] == "AFTER_HOURS_MOTION").sum()) if not sec.empty else 0,
-        "staff_zone": int((sec["event_type"] == "RESTRICTED_ZONE_ENTRY").sum()) if not sec.empty else 0,
-        "shelf_vs_till": sorted(gap, key=lambda g: -g["value"]),
-        "unbilled_value": round(sum(g["value"] for g in gap)),
-    }

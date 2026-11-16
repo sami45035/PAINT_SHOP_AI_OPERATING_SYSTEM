@@ -1,15 +1,14 @@
 """
 Sample shop-camera history (source = 'sample'), built from the sample sales.
 
-So the camera screens have 30 days to show on day one, every visit, shelf
-pick and walk-out here is consistent with the sales table:
+So the camera screens have 30 days to show on day one, every visit and shelf
+pick here is consistent with the sales table:
 - each bill in an hour is one visitor who reached the counter; the rest of
   that hour's visitors browsed (a few asked something at the counter)
 - buyers of a 1 L / 4 L pack that sits on a camera-watched shelf took those
   cans off the shelf; browsers sometimes pick a can up and put it back
 - shelves are refilled each morning; two are left short so "refill" and
   "pre-order" have something real to find
-- three walk-outs with an unpaid can (one recent, two already handled)
 
 Run on its own to add the history to an existing database:
     python data/seed_camera.py
@@ -39,9 +38,6 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
     rnd = random.Random(seed)
     cur = conn.cursor()
     cur.executescript(CAMERA_TABLES_SQL)
-    cols = [r[1] for r in cur.execute("PRAGMA table_info(security_events);").fetchall()]
-    if "source" not in cols:
-        cur.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
     from src.billing import ensure_tables as billing_tables
 
     billing_tables(conn)                     # bills / didn't-buy tables and the visit columns they need
@@ -58,7 +54,6 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
         f"SELECT p.id FROM products p JOIN (SELECT product_id, SUM(current_stock) AS have, MAX(min_threshold) AS low "
         f"FROM inventory GROUP BY product_id) i ON i.product_id = {stock_item} WHERE p.category != 'Waterproofing' "
         f"{not_base} AND i.have <= i.low ORDER BY p.id;").fetchall()][:5]
-    cur.execute("DELETE FROM security_events WHERE event_type = 'UNPAID_EXIT' AND source = 'sample';")
 
     latest = cur.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales;").fetchone()[0]
     if not latest:
@@ -86,10 +81,6 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
 
     def ev(at, sid, kind, qty):
         events.append(("sample", at.strftime("%Y-%m-%d %H:%M:%S"), sid, pid[sid], kind, qty))
-
-    # Walk-outs: (days ago, hour, slot, cans, status)
-    walkouts = {(0, 10): ("B2", 1, "NEW"), (2, 18): ("B3", 1, "SEEN"), (9, 12): ("B1", 2, "FALSE_ALARM"),
-                (17, 19): ("A2", 1, "RESOLVED")}
 
     day = start
     while day <= today:
@@ -122,8 +113,7 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
                     "ON p.id = s.product_id WHERE s.sale_timestamp >= ? AND s.sale_timestamp < ?;",
                     (ts, (hour_start + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"))).fetchall():
                 lines[inv].append((p, q, size))
-            wo = walkouts.get((ago, hr))
-            n_visitors = max(int(visitors), len(bills) + (1 if wo else 0))
+            n_visitors = max(int(visitors), len(bills))
             buyers = sorted(bills, key=lambda b: b[1])
             for k in range(n_visitors):
                 if k < len(buyers):
@@ -154,13 +144,6 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
                 entered = hour_start + timedelta(minutes=rnd.uniform(0, 50))
                 stay = max(2.0, rnd.gauss((dwell or 14) * 0.6, 3))
                 left = entered + timedelta(minutes=stay)
-                if wo and k == len(buyers):
-                    sid, n, _ = wo
-                    take = min(n, level[sid])
-                    ev(entered + timedelta(minutes=stay * 0.5), sid, "pick", take)
-                    level[sid] -= take
-                    visits.append(("sample", entered, left, False, {sid}, take, 0, "unpaid_exit", {}))
-                    continue
                 shelves, back = set(), 0
                 if rnd.random() < 0.7:
                     for sid in rnd.sample(list(pid), k=rnd.choice([1, 1, 2])):
@@ -199,15 +182,6 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
     cur.executemany("INSERT INTO no_sales (at, source, reason, product_id) VALUES (?, ?, ?, ?);",
                     [(at, src, r, pid) for src, at, r, pid in no_sales])
 
-    labels = {sid: f"{shade} {size:g} L" for sid, shade, size in DEMO_SLOT_PRODUCTS}
-    for (ago, hr), (sid, n, status) in walkouts.items():
-        at = (today - timedelta(days=ago)).replace(hour=hr, minute=37, second=12)
-        cur.execute(
-            "INSERT INTO security_events (timestamp, event_type, zone, severity, status, details, source) "
-            "VALUES (?, 'UNPAID_EXIT', 'Front door', 'CRITICAL', ?, ?, 'sample');",
-            (at.strftime("%Y-%m-%d %H:%M:%S"), status,
-             f"Someone took {n} × {labels[sid]} ({names.get(sid, sid)}) and left at {at.strftime('%I:%M %p').lstrip('0')} "
-             f"without going to the counter."))
     conn.commit()
     return len(visits)
 
