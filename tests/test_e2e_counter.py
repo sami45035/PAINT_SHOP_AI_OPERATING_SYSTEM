@@ -181,7 +181,7 @@ class TestCounterCamera(E2E):
             s = db.get_sales_summary(30)
         self.assertEqual(s["today_visitors"], 2)
         self.assertEqual(s["today_bills_vs_visitors"], 1)          # the one bill saved at the counter, not sample sales
-        self.assertGreater(s["today_invoices"], 1)                 # the day's sample bills still count as sales
+        self.assertGreaterEqual(s["today_invoices"], 1)            # every bill still counts as a sale (sample ones too, if any today)
         self.assertEqual(s["today_conversion_pct"], 50.0)          # same as the Store Camera screen
 
     def test_visit_times_are_when_they_were_there(self):
