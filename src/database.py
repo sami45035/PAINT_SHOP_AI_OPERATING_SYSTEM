@@ -279,12 +279,16 @@ def get_inventory_status(on_day: Optional[date] = None) -> pd.DataFrame:
         p.pack_size_litres, p.cost_price, p.selling_price,
         i.batch_no, i.current_stock, i.on_order, i.min_threshold, i.max_threshold,
         i.purchase_date, i.expiry_date, i.shelf_location,
-        s.name as supplier_name, s.lead_time_days, s.moq_units
+        s.name as supplier_name, s.lead_time_days, s.moq_units,
+        COALESCE(p.is_base, 0) AS is_base,
+        (SELECT GROUP_CONCAT(t.shade_name, ', ') FROM (SELECT DISTINCT shade_name FROM products
+             WHERE base_id = p.id ORDER BY shade_name) t) AS tints
     FROM inventory i
     JOIN products p ON i.product_id = p.id
     LEFT JOIN suppliers s ON p.supplier_id = s.id;
     """
     with sqlite3.connect(DB_PATH) as conn:
+        ensure_base_columns(conn)
         df = pd.read_sql_query(query, conn)
 
     df["stock_value"] = df["current_stock"] * df["cost_price"]
@@ -562,8 +566,9 @@ def get_top_and_slow_shades(limit: int = 10, on_day: Optional[date] = None, wind
                    i.current_stock, (i.current_stock * p.cost_price) as tied_up_capital,
                    COALESCE(SUM(s.quantity), 0) as total_units_sold
             FROM products p
-            JOIN inventory i ON p.id = i.product_id
-            LEFT JOIN sales s ON p.id = s.product_id AND DATE(s.sale_timestamp) > ? AND s.sale_timestamp <= ?
+            JOIN (SELECT product_id, SUM(current_stock) AS current_stock FROM inventory GROUP BY product_id) i
+                 ON p.id = i.product_id
+            LEFT JOIN sales_stock s ON p.id = s.stock_id AND DATE(s.sale_timestamp) > ? AND s.sale_timestamp <= ?
             WHERE i.current_stock > 0
             GROUP BY p.id
             ORDER BY total_units_sold ASC, tied_up_capital DESC
@@ -722,6 +727,37 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 """
 
+# A paint shop keeps stock in BASES: a tinted shade (base_id set) is made at the counter from its base,
+# so its stock is the base's stock. Ready-mix products (primer, waterproofing, ...) and the bases
+# themselves are their own stock item. Use STOCK_ID wherever sales are set against stock.
+STOCK_ID = "COALESCE(p.base_id, p.id)"
+
+
+def ensure_base_columns(conn) -> None:
+    """Older databases: no bases yet (every product is its own stock item)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(products);").fetchall()]
+    if "is_base" not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN is_base INTEGER NOT NULL DEFAULT 0;")
+    if "base_id" not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN base_id INTEGER;")
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'sales_stock';").fetchone():
+        # each sale, with the stock item it came off (made once: no schema change on every bill)
+        conn.execute("CREATE VIEW IF NOT EXISTS sales_stock AS SELECT s.*, COALESCE(p.base_id, p.id) AS stock_id "
+                     "FROM sales s JOIN products p ON p.id = s.product_id;")
+
+
+def stock_map(conn=None) -> Dict[int, int]:
+    """Product -> the stock item it is sold from (a tinted shade -> its base; anything else -> itself)."""
+    close = conn is None
+    conn = conn or get_connection()
+    try:
+        ensure_base_columns(conn)
+        return {int(a): int(b) for a, b in conn.execute("SELECT id, COALESCE(base_id, id) FROM products;").fetchall()}
+    finally:
+        if close:
+            conn.close()
+
+
 def ensure_app_tables() -> None:
     """Small tables the app writes to (kept separate from the seeded data)."""
     with get_connection() as conn:
@@ -731,6 +767,7 @@ def ensure_app_tables() -> None:
         sec_cols = [r[1] for r in conn.execute("PRAGMA table_info(security_events);").fetchall()]
         if "source" not in sec_cols:
             conn.execute("ALTER TABLE security_events ADD COLUMN source TEXT NOT NULL DEFAULT 'sample';")
+        ensure_base_columns(conn)
         conn.executescript(CAMERA_TABLES_SQL)
         from src.billing import ensure_tables as _billing_tables
 

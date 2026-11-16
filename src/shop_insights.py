@@ -26,6 +26,7 @@ import pandas as pd
 
 from src.formatting import ratio
 from src import clock
+from src import database as db
 from src.config import DB_PATH
 
 
@@ -242,13 +243,15 @@ def shelves(source: str) -> pd.DataFrame:
         return st
     ev = _q("SELECT slot_id, kind, qty, at FROM shelf_events WHERE source = ? AND at <= ?;", (source, now))
     inv = _q("SELECT product_id, SUM(current_stock) AS in_shop, SUM(on_order) AS on_order FROM inventory GROUP BY product_id;")
+    stock_of = db.stock_map()                  # a tinted shade's store-room stock is its base's
     rows = []
     for r in st.to_dict("records"):
         e = ev[(ev["slot_id"] == r["slot_id"]) & (ev["at"] > r["updated_at"])]
         change = int(e.loc[e["kind"].isin(["restock", "put_back"]), "qty"].sum() - e.loc[e["kind"] == "pick", "qty"].sum())
         cans = max(0, min(int(r["capacity"]), int(r["cans"]) + change))
         last = ev[ev["slot_id"] == r["slot_id"]]["at"].max() if not ev.empty else None
-        stock = inv[inv["product_id"] == r["product_id"]]
+        pid = r["product_id"]
+        stock = inv[inv["product_id"] == (stock_of.get(int(pid), int(pid)) if pd.notna(pid) else pid)]
         in_shop = int(stock["in_shop"].iloc[0]) if not stock.empty else 0
         on_order = int(stock["on_order"].iloc[0]) if not stock.empty else 0
         rows.append({**r, "cans": cans, "fill_pct": round(cans / max(1, int(r["capacity"])) * 100),
@@ -377,11 +380,13 @@ def preorder(source: str, day: Optional[date] = None) -> Dict[str, Any]:
                     refill.append({**r, "move": 0, "level": "act_now",
                                    "message": f"{r['slot_name']}: {r['cans']} of {cap} on the shelf and none in the store room."})
     factors = {}
+    stock_of = db.stock_map()                  # camera sees shades; stock is ordered as their bases
     if not cam.empty:
         for r in cam.to_dict("records"):
             if r["picked"] >= 5 and r["picked_prev"] >= 3:
-                factors[r["product_id"]] = max(0.8, min(1.5, r["picked"] / r["picked_prev"]))
-    watched = set(int(p) for p in sh["product_id"].dropna()) if not sh.empty else set()
+                sid = stock_of.get(int(r["product_id"]), int(r["product_id"]))
+                factors[sid] = max(factors.get(sid, 0.8), max(0.8, min(1.5, r["picked"] / r["picked_prev"])))
+    watched = set(stock_of.get(int(p), int(p)) for p in sh["product_id"].dropna()) if not sh.empty else set()
     for r in fc.to_dict("records"):
         pid = int(r["product_id"])
         f = factors.get(pid, 1.0)

@@ -274,7 +274,7 @@
     var lines = c.lines.map(function (l) {
       return '<div class="ln"><span class="sw" style="background:' + esc(l.hex) + '"></span>'
         + '<span class="nm"><b>' + esc(l.label) + '</b><span class="' + (l.short ? "short" : "") + '">'
-        + (l.short ? "only " + l.in_stock + " in stock" : esc(l.price) + " each") + '</span></span>'
+        + esc(l.note || (l.short ? "only " + l.in_stock + " in stock" : l.price + " each")) + '</span></span>'
         + '<span class="qty"><button data-a="dec" data-p="' + l.pid + '" aria-label="one less">−</button><b>' + l.qty + '</b>'
         + '<button data-a="inc" data-p="' + l.pid + '" aria-label="one more">+</button></span>'
         + '<span class="amt">' + esc(l.amount) + '</span></div>';

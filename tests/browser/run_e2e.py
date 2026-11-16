@@ -144,6 +144,16 @@ def page_tour(browser):
         page.screenshot(path=str(WORK / f"page_{path}.png"), full_page=True)
         bad = problems(page)
         check(f"page {path} opens cleanly", done and not bad, "; ".join(bad) or f"{took:.1f} s")
+    # Stock: bases, as the dealer asked ("how many AB2 bases?")
+    page.goto(f"{BASE}/stock")
+    settle(page)
+    page.get_by_role("tab", name="Bases").click()
+    page.wait_for_timeout(800)
+    panel = page.locator('[role="tabpanel"]:visible').first.inner_text()
+    check("Stock shows bases with what they tint", "RB4" in panel and "Royale Blue" in panel and not problems(page),
+          panel[:200].replace("\n", " | "))
+    page.screenshot(path=str(WORK / "stock_bases.png"), full_page=True)
+
     # Colour Studio: the sample room is painted, shades are suggested, a designer look applies
     page.goto(f"{BASE}/colour-studio")
     settle(page, timeout_s=300)                      # first visit downloads the wall model
@@ -212,7 +222,9 @@ def counter_flow(pw, db: Path):
 
     # stock before
     q = lambda sql, a=(): sqlite3.connect(db).execute(sql, a).fetchall()
-    stock = lambda sku: q("SELECT SUM(current_stock) FROM inventory i JOIN products p ON p.id=i.product_id WHERE sku=?", (sku,))[0][0]
+    # a tinted shade is sold from its base: its stock is the base's
+    stock = lambda sku: q("SELECT SUM(i.current_stock) FROM products p JOIN inventory i "
+                          "ON i.product_id = COALESCE(p.base_id, p.id) WHERE p.sku=?", (sku,))[0][0]
     before = {s: stock(s) for s in ("SKU-AS-1001", "SKU-NE-1070")}
 
     # laptop: Store Camera, webcam -> browser camera
@@ -241,6 +253,8 @@ def counter_flow(pw, db: Path):
     try:
         sc.locator(".cart-head .n").filter(has_text="2 cans").wait_for(timeout=25000)
         check("scanner adds both cans from their QR labels", True, sc.locator(".cart-head").inner_text().replace("\n", " "))
+        check("each tinted can shows its base on the bill", "tinted from" in sc.locator("#cart").inner_text(),
+              sc.locator("#cart").inner_text()[:160].replace("\n", " "))
     except Exception:
         check("scanner adds both cans from their QR labels", False, sc.locator("#cart").inner_text()[:200])
     phone.screenshot(path=str(WORK / "phone_cart.png"))

@@ -94,6 +94,53 @@ def _reorder_plan(day: str) -> None:
             st.rerun()
 
 
+def _bases(day: str) -> None:
+    """Tinting bases: how many AB2 bases are there? (asked for by a dealer we showed the app to)"""
+    inv = data.inventory(day)
+    b = inv[inv["is_base"] == 1] if "is_base" in inv else inv.iloc[0:0]
+    if b.empty:
+        st.caption("No tinting bases in this shop's catalogue yet — every product is kept as its own stock.")
+        return
+    g = b.groupby(["brand", "sub_brand", "shade_code", "pack_size_litres"], as_index=False).agg(
+        cans=("current_stock", "sum"), coming=("on_order", "sum"), low=("min_threshold", "max"), tints=("tints", "first"))
+    low_bases = g[g["cans"] <= g["low"]]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi_card("Bases in stock", f"{int(g['cans'].sum()):,} cans", f"{g['shade_code'].nunique()} base codes")
+    with c2:
+        kpi_card("Running low", f"{len(low_bases)}", "base · pack at or below its minimum",
+                 value_colour="#B54708" if len(low_bases) else None)
+    with c3:
+        kpi_card("Shades they make", f"{int(b['tints'].dropna().str.split(', ').explode().nunique())}",
+                 "tinted at the counter")
+    q = st.text_input("Find a base", placeholder="AB2, Apex, Royale…", key="sr_base_q")
+    if q:
+        hay = (g["shade_code"] + " " + g["sub_brand"] + " " + g["brand"] + " " + g["tints"].fillna("")).str.lower()
+        g = g[hay.str.contains(q.lower(), regex=False)]
+    if g.empty:
+        st.caption("No base matches.")
+        return
+    packs = sorted(g["pack_size_litres"].unique())
+    wide = g.pivot_table(index=["shade_code", "sub_brand", "brand"], columns="pack_size_litres", values="cans",
+                         aggfunc="sum", fill_value=0)
+    lows = set(zip(low_bases["shade_code"], low_bases["pack_size_litres"]))
+    tints = g.groupby("shade_code")["tints"].first()
+    table = pd.DataFrame({"Base": [i[0] for i in wide.index], "Quality": [i[1] for i in wide.index],
+                          "Brand": [i[2] for i in wide.index]})
+    for size in packs:
+        table[pack(size)] = [int(wide.loc[i, size]) if size in wide.columns else 0 for i in wide.index]
+    table["Tints"] = [tints.get(i[0]) or "—" for i in wide.index]
+    codes = table["Base"].tolist()
+
+    def mark_low(col):
+        size = next((sz for sz in packs if pack(sz) == col.name), None)
+        return ["color:#B42318;font-weight:700" if (c, size) in lows else "" for c in codes]
+
+    show_table(table.style.apply(mark_low, subset=[pack(sz) for sz in packs]))
+    st.caption("A shade is tinted at the counter from its base (Base 1 for pastels … Base 4 for deep colours), so the "
+               "shop keeps stock in bases: selling Royale Blue 4 L takes one RB4 4 L base off. Red = at or below the minimum.")
+
+
 def _all_stock(day: str) -> None:
     inv = data.inventory(day)
     c1, c2 = st.columns([2, 3], vertical_alignment="bottom")
@@ -115,6 +162,7 @@ def _all_stock(day: str) -> None:
         "Pack": view["pack_size_litres"].map(pack), "On shelf": view["current_stock"], "Coming": view["on_order"],
         "Price": view["selling_price"].map(rupees), "Expires in": view["days_to_expiry"].map(lambda d: "expired" if d < 0 else (f"{d} day" if d == 1 else f"{d} days")),
         "Status": view["health_status"].map(STATUS_WORDS), "Shelf": view["shelf_location"], "Supplier": view["supplier_name"],
+        "Tints": view["tints"].fillna("—") if "tints" in view else "—",
     }))
 
 
@@ -163,9 +211,11 @@ SS_DEAL = "sr_deal_result"
 def render() -> None:
     page_header("Stock & Reorder", "What to order, how much, and by when — with supplier delivery times built in.")
     day = clock.today_str()
-    t1, t2, t3 = st.tabs(["Reorder plan", "All stock", "Deal Checker"])
+    t1, tb, t2, t3 = st.tabs(["Reorder plan", "Bases", "All stock", "Deal Checker"])
     with t1:
         _reorder_plan(day)
+    with tb:
+        _bases(day)
     with t2:
         _all_stock(day)
     with t3:

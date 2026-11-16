@@ -132,9 +132,13 @@ class TestReorderUsesTheModel(unittest.TestCase):
         fc = compute_sales_forecast(30)
         model = sf.Forecaster.fit(sf.load_history(clock.today()), clock.today())
         pred = model.forecast(30, clock.today() + timedelta(days=1))
+        from src.database import stock_map
+
+        stock_of = stock_map()          # a base's demand is the sum of the shades tinted from it
+        pred = pred.assign(stock_id=pred["product_id"].map(lambda p: stock_of.get(int(p), int(p))))
         top = fc.sort_values("forecast_30d", ascending=False).head(5)
         for r in top.itertuples():
-            expected = pred[pred["product_id"] == r.product_id]["units"].sum()
+            expected = pred[pred["stock_id"] == r.product_id]["units"].sum()
             self.assertEqual(r.forecast_30d, math.ceil(expected))
 
 

@@ -50,9 +50,14 @@ def seed_camera_history(conn: sqlite3.Connection, days: int = DAYS, seed: int = 
     why_rnd = random.Random(seed + 1)        # separate stream: reasons don't change the rest of the story
     no_sales = []
     # shades customers asked for that the shop is short of (they turn up under "not in stock")
+    # shades customers ask for that the shop can't make: their base (or the ready-mix itself) is low
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(products);").fetchall()}
+    stock_item = "COALESCE(p.base_id, p.id)" if "base_id" in cols else "p.id"
+    not_base = "AND COALESCE(p.is_base, 0) = 0" if "is_base" in cols else ""
     low_stock = [r[0] for r in cur.execute(
-        "SELECT p.id FROM products p JOIN inventory i ON i.product_id = p.id WHERE p.category != 'Waterproofing' "
-        "GROUP BY p.id HAVING SUM(i.current_stock) <= MIN(i.min_threshold) ORDER BY p.id;").fetchall()][:5]
+        f"SELECT p.id FROM products p JOIN (SELECT product_id, SUM(current_stock) AS have, MAX(min_threshold) AS low "
+        f"FROM inventory GROUP BY product_id) i ON i.product_id = {stock_item} WHERE p.category != 'Waterproofing' "
+        f"{not_base} AND i.have <= i.low ORDER BY p.id;").fetchall()][:5]
     cur.execute("DELETE FROM security_events WHERE event_type = 'UNPAID_EXIT' AND source = 'sample';")
 
     latest = cur.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales;").fetchone()[0]

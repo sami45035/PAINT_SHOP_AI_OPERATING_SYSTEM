@@ -55,7 +55,9 @@ def init_db():
         cost_price REAL NOT NULL,
         selling_price REAL NOT NULL,
         supplier_id INTEGER REFERENCES suppliers(id),
-        room_tags TEXT
+        room_tags TEXT,
+        is_base INTEGER NOT NULL DEFAULT 0,      -- a tinting base (stock is kept in bases)
+        base_id INTEGER REFERENCES products(id)  -- a tinted shade: the base it is made from
     );
     """)
 
@@ -131,6 +133,84 @@ def init_db():
 
     conn.commit()
     return conn
+
+TINTED = ("Interior Emulsion", "Exterior Emulsion", "Enamel")
+BASE_HEX = {1: "#F6F4EE", 2: "#ECE9E1", 3: "#DEDAD0", 4: "#CFCABE"}   # bases look white to light grey
+BASE_WORD = {1: "pastel", 2: "light", 3: "mid-tone", 4: "deep"}
+
+
+def base_number(hex_code: str) -> int:
+    """Which base a shade is tinted from: by how light it is (more white in the base for pastels)."""
+    import colorsys
+
+    h = hex_code.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    light = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return 1 if light >= 0.78 else 2 if light >= 0.58 else 3 if light >= 0.36 else 4
+
+
+LINE_CODES = {   # how a dealer writes the bases: "AB2" = Apex Base 2 (from the dealer we showed the app to)
+    "Apex Ultima": "A", "Apcolite Premium": "AP", "Royale Luxury Emulsion": "R", "Tractor Emulsion": "T",
+    "Breathe Easy": "BE", "Silk Glamour": "SG", "WeatherCoat Long Life": "WC", "Luxol High Gloss": "LX",
+    "Promise Interior": "PR", "Velvet Touch": "VT", "Weathershield Max": "WS", "Beauty Gold": "BG",
+    "Excel Mica Marble": "EX", "Impressions Eco Clean": "IM",
+}
+
+
+def base_codes(lines):
+    """Short codes per quality line, as dealers write them: Apex Ultima -> A (so Base 2 = AB2)."""
+    out = {ln: LINE_CODES[ln] for ln in lines if ln in LINE_CODES}
+    used = set(out.values())
+    for line in lines:
+        if line in out:
+            continue
+        w = [x for x in line.replace("-", " ").split() if x[:1].isalpha()]
+        cands = [w[0][0], w[0][:2], (w[0][0] + w[1][0]) if len(w) > 1 else w[0][:3], w[0][:3]]
+        code = next((c.upper() for c in cands if c.upper() not in used), line[:4].upper())
+        used.add(code)
+        out[line] = code
+    return out
+
+
+def make_bases(cur, today):
+    shades = cur.execute(f"SELECT id, brand, sub_brand, shade_name, hex_code, category, finish, pack_size_litres, "
+                         f"cost_price, selling_price, supplier_id FROM products WHERE category IN "
+                         f"({','.join('?' * len(TINTED))}) ORDER BY id;", TINTED).fetchall()
+    codes = base_codes(sorted({r[2] for r in shades}))
+    bases = {}
+    for (pid, brand, line, name, hexc, cat, fin, size, cost, price, supp) in shades:
+        n = base_number(hexc)
+        key = (brand, line, n, size)
+        if key not in bases:
+            code = f"{codes[line]}B{n}"
+            cur.execute("INSERT INTO products (sku, brand, sub_brand, shade_name, shade_code, hex_code, category, finish, "
+                        "pack_size_litres, cost_price, selling_price, supplier_id, room_tags, is_base) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1);",
+                        (f"BASE-{code}-{size:g}L", brand, line, f"{line} · {code} base", code, BASE_HEX[n], cat, fin,
+                         size, round(cost * 0.9, 2), round(price * 0.9, 2), supp))
+            bases[key] = cur.lastrowid
+        cur.execute("UPDATE products SET base_id = ? WHERE id = ?;", (bases[key], pid))
+
+    soon = (today + timedelta(days=45)).strftime("%Y-%m-%d")
+    for base_id in bases.values():
+        rows = cur.execute("SELECT i.id, i.current_stock, i.on_order, i.min_threshold, i.max_threshold, i.purchase_date, "
+                           "i.expiry_date, i.shelf_location, i.batch_no FROM inventory i JOIN products p ON p.id = i.product_id "
+                           "WHERE p.base_id = ? ORDER BY i.id;", (base_id,)).fetchall()
+        if not rows:
+            continue
+        expiring = [r for r in rows if r[6] <= soon]            # a batch close to expiry stays its own batch
+        main = [r for r in rows if r[6] > soon] or rows
+        cur.execute("INSERT INTO inventory (product_id, batch_no, current_stock, on_order, min_threshold, max_threshold, "
+                    "purchase_date, expiry_date, shelf_location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                    (base_id, main[0][8], sum(r[1] for r in main), sum(r[2] for r in main),
+                     max(6, round(sum(r[3] for r in main) * 0.6)), max(20, round(sum(r[4] for r in main) * 0.6)),
+                     min(r[5] for r in main), min(r[6] for r in main), main[0][7]))
+        for r in expiring if main is not rows else []:
+            cur.execute("INSERT INTO inventory (product_id, batch_no, current_stock, on_order, min_threshold, max_threshold, "
+                        "purchase_date, expiry_date, shelf_location) VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?);",
+                        (base_id, r[8], r[1], r[4], r[5], r[6], r[7]))
+        cur.execute(f"DELETE FROM inventory WHERE id IN ({','.join('?' * len(rows))});", [r[0] for r in rows])
+
 
 def populate_database(conn):
     cursor = conn.cursor()
@@ -260,6 +340,12 @@ def populate_database(conn):
             prod["id"], batch_no, stock, on_order, min_thresh, max_thresh,
             purchase_date.strftime("%Y-%m-%d"), expiry.strftime("%Y-%m-%d"), shelf
         ))
+    conn.commit()
+
+    # 3b. A paint shop stocks BASES, not finished shades: each shade of an emulsion or enamel is tinted
+    #     at the counter from a base of its quality line (Base 1 pastel ... Base 4 deep). The stock of the
+    #     tinted shades moves onto their bases; selling a shade takes one base off. (Asked for by a dealer.)
+    make_bases(cursor, today)
     conn.commit()
 
     # 4. Populate 180 Days of Historical Sales & Hourly Footfall

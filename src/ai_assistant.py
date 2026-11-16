@@ -42,22 +42,35 @@ STOPWORDS = {
 # --- Tools: each returns plain markdown built from live data ---------------------
 
 def tool_check_stock(query: str) -> str:
-    df = get_inventory_status()
+    """Can we sell it? A tinted shade can while its base is in stock, so its line shows the base (e.g. RB4)."""
+    from src.billing import products
+
+    cat = products()
+    inv = get_inventory_status().groupby("product_id").agg(min_threshold=("min_threshold", "max"),
+                                                            shelf_location=("shelf_location", "first"))
     tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if t not in STOPWORDS]
     if not tokens:
         return "Which shade or brand should I check? For example: *Do we have Royale Blue?*"
-    hay = (df["brand"] + " " + df["shade_name"] + " " + df["category"] + " " + df["sku"]).str.lower()
+    hay = (cat["brand"] + " " + cat["shade_name"] + " " + cat["category"] + " " + cat["sku"] + " "
+           + cat["base"].fillna("")).str.lower()
     mask = hay.apply(lambda h: all(t in h for t in tokens))
     if not mask.any():  # fall back to any-token match
         mask = hay.apply(lambda h: any(t in h for t in tokens))
-    matches = df[mask].sort_values(["shade_name", "pack_size_litres"])
+    matches = cat[mask].sort_values(["is_base", "shade_name", "pack_size_litres"])
     if matches.empty:
         return f"I couldn't find anything matching “{query}” in stock."
     lines = [f"Found {len(matches)} item{'s' if len(matches) != 1 else ''}:", "",
-             "| Product | Pack | On shelf | Price | Shelf |", "|---|---|---|---|---|"]
+             "| Product | Pack | In stock | Price | Shelf |", "|---|---|---|---|---|"]
     for r in matches.head(10).itertuples(index=False):
-        flag = " (low)" if r.current_stock <= r.min_threshold else ""
-        lines.append(f"| {r.brand} {r.shade_name} | {r.pack_size_litres:g} L | {r.current_stock}{flag} | {_rupees(r.selling_price)} | {r.shelf_location} |")
+        sid = int(r.stock_id)
+        low = sid in inv.index and r.in_stock <= inv.loc[sid, "min_threshold"]
+        shelf = inv.loc[sid, "shelf_location"] if sid in inv.index else "—"
+        have = f"{int(r.in_stock)} {r.base} base{'s' if int(r.in_stock) != 1 else ''}" if isinstance(r.base, str) \
+            else f"{int(r.in_stock)}"
+        lines.append(f"| {r.brand} {r.shade_name} | {r.pack_size_litres:g} L | {have}{' (low)' if low else ''} | "
+                     f"{_rupees(r.selling_price)} | {shelf} |")
+    if matches["base"].notna().any():
+        lines += ["", "_Tinted shades are made at the counter from their base, so what's in stock is the base._"]
     return "\n".join(lines)
 
 

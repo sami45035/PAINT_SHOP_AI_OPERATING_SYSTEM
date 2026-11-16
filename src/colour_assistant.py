@@ -107,12 +107,13 @@ def enrich_shades_with_stock(shades: List[Dict[str, Any]]) -> List[Dict[str, Any
         enriched = []
         for s in shades:
             cursor.execute("""
-            SELECT p.id, p.sku, p.pack_size_litres, p.selling_price, i.current_stock
+            SELECT p.id, p.sku, p.pack_size_litres, p.selling_price,
+                   (SELECT COALESCE(SUM(i.current_stock), 0) FROM inventory i
+                    WHERE i.product_id = COALESCE(p.base_id, p.id)) AS current_stock
             FROM products p
-            JOIN inventory i ON p.id = i.product_id
-            WHERE p.brand = ? AND p.shade_name = ?
+            WHERE p.brand = ? AND p.shade_name = ? AND COALESCE(p.is_base, 0) = 0
             ORDER BY p.pack_size_litres;
-            """, (s["brand"], s["shade_name"]))
+            """, (s["brand"], s["shade_name"]))           # a tinted shade can be made while its base is in stock
             rows = cursor.fetchall()
             
             sizes = []
@@ -147,10 +148,13 @@ def get_in_stock_alternatives(target_hex: str, exclude_shade: str, limit: int = 
     """
     with sqlite3.connect(DB_PATH) as conn:
         query = """
-        SELECT DISTINCT p.brand, p.sub_brand, p.shade_name, p.shade_code, p.hex_code, p.category, p.selling_price, i.current_stock
-        FROM products p
-        JOIN inventory i ON p.id = i.product_id
-        WHERE i.current_stock > 5 AND p.shade_name != ?;
+        SELECT * FROM (
+            SELECT DISTINCT p.brand, p.sub_brand, p.shade_name, p.shade_code, p.hex_code, p.category, p.selling_price,
+                   (SELECT COALESCE(SUM(i.current_stock), 0) FROM inventory i
+                    WHERE i.product_id = COALESCE(p.base_id, p.id)) AS current_stock
+            FROM products p
+            WHERE COALESCE(p.is_base, 0) = 0 AND p.shade_name != ?
+        ) WHERE current_stock > 5;
         """
         df = pd.read_sql_query(query, conn, params=(exclude_shade,))
 

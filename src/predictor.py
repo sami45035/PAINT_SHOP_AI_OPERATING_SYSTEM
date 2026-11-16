@@ -75,6 +75,11 @@ def _load_calendar(conn) -> pd.DataFrame:
 def compute_sales_forecast(forecast_days: int = 30, on_day: Optional[date] = None) -> pd.DataFrame:
     ref = on_day or clock.today()
     with sqlite3.connect(DB_PATH) as conn:
+        from src.database import ensure_base_columns
+
+        ensure_base_columns(conn)
+        # What the shop keeps in stock: bases and ready-mix products (all batches together). Tinted shades
+        # have no stock of their own: their sales count against their base.
         df = pd.read_sql_query(
             """
             SELECT p.id as product_id, p.sku, p.brand, p.sub_brand, p.shade_name, p.hex_code,
@@ -82,17 +87,19 @@ def compute_sales_forecast(forecast_days: int = 30, on_day: Optional[date] = Non
                    i.current_stock, i.on_order, i.min_threshold,
                    s.id as supplier_id, s.name as supplier_name, s.lead_time_days, s.moq_units
             FROM products p
-            JOIN inventory i ON p.id = i.product_id
+            JOIN (SELECT product_id, SUM(current_stock) AS current_stock, SUM(on_order) AS on_order,
+                         MAX(min_threshold) AS min_threshold FROM inventory GROUP BY product_id) i ON p.id = i.product_id
             LEFT JOIN suppliers s ON p.supplier_id = s.id;
             """,
             conn,
         )
+        stock_of = {int(a): int(b) for a, b in conn.execute("SELECT id, COALESCE(base_id, id) FROM products;").fetchall()}
         sales_df = pd.read_sql_query(
             """
-            SELECT product_id, SUM(quantity) as units_sold_30d, COUNT(DISTINCT invoice_no) as order_count_30d
-            FROM sales
+            SELECT stock_id AS product_id, SUM(quantity) as units_sold_30d, COUNT(DISTINCT invoice_no) as order_count_30d
+            FROM sales_stock
             WHERE DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?) AND sale_timestamp <= ?
-            GROUP BY product_id;
+            GROUP BY stock_id;
             """,
             conn,
             params=(ref.strftime("%Y-%m-%d"), f"-{LOOKBACK_DAYS} days", ref.strftime("%Y-%m-%d"),
@@ -122,12 +129,19 @@ def compute_sales_forecast(forecast_days: int = 30, on_day: Optional[date] = Non
 
         model = Forecaster.fit(load_history(ref), ref)
         pred = model.forecast(len(future_days), ref + timedelta(days=1))
-        for pid, g in pred.groupby("product_id"):
-            ai_demand[int(pid)] = g.sort_values("day")["units"].tolist()
+        for pid, g in pred.groupby("product_id"):          # a shade's forecast adds to its base's demand
+            sid = stock_of.get(int(pid), int(pid))
+            units = g.sort_values("day")["units"].tolist()
+            prev = ai_demand.get(sid)
+            ai_demand[sid] = units if prev is None else [a + b for a, b in zip(prev, units)]
+        share_of: Dict[int, float] = {}
+        for pid, sh in model.shares.items():
+            sid = stock_of.get(int(pid), int(pid))
+            share_of[sid] = share_of.get(sid, 0.0) + sh
         for r in df.itertuples(index=False):
             gm = model.groups.get(group_of(r.category))
             if gm is not None:
-                share = model.shares.get(int(r.product_id), 0.0)
+                share = share_of.get(int(r.product_id), 0.0)
                 ai_plain[int(r.product_id)] = gm.level * share
                 ai_mult[int(r.product_id)] = max(_event_factor(gm, d) for d in future_days[:7])
     except Exception:  # noqa: BLE001 - too little history: use the simple method
@@ -210,17 +224,22 @@ def evaluate_supplier_clearance_deal(
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT p.*, i.current_stock FROM products p JOIN inventory i ON p.id = i.product_id WHERE p.id = ?;",
+            "SELECT p.*, (SELECT COALESCE(SUM(i.current_stock), 0) FROM inventory i "
+            "WHERE i.product_id = COALESCE(p.base_id, p.id)) AS current_stock FROM products p WHERE p.id = ?;",
             (product_id,),
         )
         row = cur.fetchone()
         if not row:
             return {"error": "Product not found"}
         prod = dict(zip([d[0] for d in cur.description], row))
-        units_30d = cur.execute(
+        from src.database import ensure_base_columns
+
+        ensure_base_columns(conn)
+        units_30d = cur.execute(            # a base sells through every shade tinted from it
             """
-            SELECT COALESCE(SUM(quantity), 0) FROM sales
-            WHERE product_id = ? AND DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?);
+            SELECT COALESCE(SUM(quantity), 0) FROM sales_stock
+            WHERE stock_id = (SELECT COALESCE(base_id, id) FROM products WHERE id = ?)
+              AND DATE(sale_timestamp) > DATE(?, ?) AND DATE(sale_timestamp) <= DATE(?);
             """,
             (product_id, ref.strftime("%Y-%m-%d"), f"-{LOOKBACK_DAYS} days", ref.strftime("%Y-%m-%d")),
         ).fetchone()[0]

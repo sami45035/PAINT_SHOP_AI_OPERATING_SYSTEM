@@ -108,7 +108,8 @@ class TestLayer1Data(unittest.TestCase):
             c.execute("INSERT INTO bills (invoice_no, created_at, source, customer_type, payment_mode, items, total, status) "
                       "VALUES ('APX-KEEP', '2026-01-01 10:00:00', 'app', 'Retail Walk-in', 'Cash', 1, 100, 'paid');")
             latest = c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0]
-            exp_before = c.execute("SELECT expiry_date FROM inventory WHERE id = 1").fetchone()[0]
+            first_row = c.execute("SELECT MIN(id) FROM inventory").fetchone()[0]
+            exp_before = c.execute("SELECT expiry_date FROM inventory WHERE id = ?", (first_row,)).fetchone()[0]
         future = datetime.strptime(latest, "%Y-%m-%d").date() + timedelta(days=10)
         with mock.patch.object(db, "DB_PATH", tmp), mock.patch.object(db, "DEMO_MODE", True), \
                 mock.patch.object(db.clock, "today", return_value=future):
@@ -116,7 +117,7 @@ class TestLayer1Data(unittest.TestCase):
             self.assertEqual(db.ensure_demo_dates_current(), 0)  # idempotent
         with sqlite3.connect(tmp) as c:
             self.assertEqual(c.execute("SELECT MAX(DATE(sale_timestamp)) FROM sales").fetchone()[0], future.isoformat())
-            exp_after = c.execute("SELECT expiry_date FROM inventory WHERE id = 1").fetchone()[0]
+            exp_after = c.execute("SELECT expiry_date FROM inventory WHERE id = ?", (first_row,)).fetchone()[0]
         delta = (datetime.strptime(exp_after, "%Y-%m-%d") - datetime.strptime(exp_before, "%Y-%m-%d")).days
         self.assertEqual(delta, 10)
         with sqlite3.connect(tmp) as c:

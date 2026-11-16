@@ -59,17 +59,28 @@ def _notice(kind: str, text: str) -> None:
 def _cart_view() -> Dict:
     """The bill being made, as the scanner shows it (last scanned on top)."""
     cat = _catalogue().set_index("product_id")
+    cart = [l for l in _cart() if l["product_id"] in cat.index]
+    # tinted shades come out of their base: shades on the same base share its stock
+    need: Dict[int, int] = {}
+    for line in cart:
+        sid = int(cat.loc[line["product_id"], "stock_id"]) if "stock_id" in cat else int(line["product_id"])
+        need[sid] = need.get(sid, 0) + int(line["qty"])
     lines, total, count = [], 0.0, 0
-    for line in _cart():
-        if line["product_id"] not in cat.index:
-            continue
+    for line in cart:
         r = cat.loc[line["product_id"]]
+        sid = int(r["stock_id"]) if "stock_id" in r else int(line["product_id"])
+        base = r.get("base") if isinstance(r.get("base"), str) else None
+        have = int(r["in_stock"])
+        short = have < need[sid]
         amount = line["qty"] * float(r["selling_price"])
         total += amount
         count += line["qty"]
+        note = (f"only {have} {base} base{'s' if have != 1 else ''} left" if short and base else
+                f"only {have} in stock" if short else
+                f"{rupees(r['selling_price'])} each · tinted from {base}" if base else f"{rupees(r['selling_price'])} each")
         lines.append({"pid": int(line["product_id"]), "qty": int(line["qty"]), "label": str(r["label"]),
                       "hex": str(r["hex_code"]), "price": rupees(r["selling_price"]), "amount": rupees(amount),
-                      "in_stock": int(r["in_stock"]), "short": int(r["in_stock"]) < line["qty"]})
+                      "in_stock": have, "short": short, "note": note})
     return {"count": count, "total": rupees(total), "lines": lines[::-1]}
 
 
@@ -155,7 +166,11 @@ def _counter() -> None:
     _handle(val)
 
     cat = _catalogue()
-    opts = {int(r["product_id"]): f"{r['label']} · {r['brand']} · {rupees(r['selling_price'])} · {int(r['in_stock'])} in stock"
+    def _avail(r) -> str:
+        b = r.get("base") if isinstance(r.get("base"), str) else None
+        return f"{int(r['in_stock'])} {b} base{'s' if int(r['in_stock']) != 1 else ''}" if b else f"{int(r['in_stock'])} in stock"
+
+    opts = {int(r["product_id"]): f"{r['label']} · {r['brand']} · {rupees(r['selling_price'])} · {_avail(r)}"
             for r in cat.to_dict("records")}
     unknown = SS.get("sb_unknown")
     if unknown:

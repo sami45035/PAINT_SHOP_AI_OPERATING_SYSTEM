@@ -132,6 +132,73 @@ class TestBills(unittest.TestCase):
         self.assertEqual(q("SELECT SUM(on_order) FROM inventory WHERE product_id = ?;", (pid,)), [(12,)])
 
 
+class TestBases(unittest.TestCase):
+    """A paint shop stocks bases; shades are tinted from them at the counter (asked for by a dealer)."""
+
+    def base_with_shades(self, stock=5, shades=2):
+        with sqlite3.connect(TMP) as c:
+            base = c.execute("INSERT INTO products (sku, brand, sub_brand, shade_name, shade_code, hex_code, category, finish, "
+                             "pack_size_litres, cost_price, selling_price, supplier_id, is_base) SELECT 'BASE-TST-' || (MAX(id)+1), "
+                             "'TestBrand', 'Test Line', 'Test Line · TB2 base', 'TB2', '#ECE9E1', 'Interior Emulsion', 'Matt', "
+                             "4.0, 300, 450, supplier_id, 1 FROM products;").lastrowid
+            c.execute("INSERT INTO inventory (product_id, batch_no, current_stock, on_order, min_threshold, max_threshold, "
+                      "purchase_date, expiry_date, shelf_location) VALUES (?, 'TBB', ?, 0, 2, 20, '2026-01-01', '2027-06-01', 'T');",
+                      (base, stock))
+            ids = []
+            for k in range(shades):
+                ids.append(c.execute("INSERT INTO products (sku, brand, sub_brand, shade_name, shade_code, hex_code, category, "
+                                     "finish, pack_size_litres, cost_price, selling_price, supplier_id, base_id) SELECT "
+                                     "'SKU-TST-' || (MAX(id)+1), 'TestBrand', 'Test Line', ?, 'T', '#A0B0C0', 'Interior Emulsion', "
+                                     "'Matt', 4.0, 320, 500, supplier_id, ? FROM products;", (f"Test Shade {k}", base)).lastrowid)
+            c.commit()
+        return base, ids
+
+    def base_stock(self, base):
+        return q("SELECT SUM(current_stock) FROM inventory WHERE product_id = ?;", (base,))[0][0]
+
+    def test_selling_a_shade_takes_a_base(self):
+        base, (shade, _) = self.base_with_shades(stock=5)
+        bill = billing.create_bill([{"product_id": shade, "qty": 2}])
+        self.assertEqual(self.base_stock(base), 3)
+        self.assertEqual(q("SELECT COUNT(*) FROM inventory WHERE product_id = ?;", (shade,)), [(0,)])   # no stock of its own
+        self.assertEqual(q("SELECT product_id, quantity FROM sales WHERE invoice_no = ?;", (bill["invoice_no"],)), [(shade, 2)])
+        self.assertEqual((bill["lines"][0]["base"], bill["lines"][0]["stock_after"]), ("TB2", 3))
+        billing.void_bill(bill["invoice_no"])
+        self.assertEqual(self.base_stock(base), 5)
+
+    def test_shades_on_one_base_share_it(self):
+        base, (a, b) = self.base_with_shades(stock=3)
+        with self.assertRaises(billing.StockError) as ctx:                 # 2 + 2 cans from 3 bases
+            billing.create_bill([{"product_id": a, "qty": 2}, {"product_id": b, "qty": 2}])
+        self.assertIn("TB2 base", ctx.exception.short[0]["label"])
+        self.assertEqual(self.base_stock(base), 3)
+        billing.create_bill([{"product_id": a, "qty": 2}, {"product_id": b, "qty": 1}])
+        self.assertEqual(self.base_stock(base), 0)
+        cat = billing.products().set_index("product_id")
+        self.assertEqual((int(cat.loc[a, "in_stock"]), cat.loc[a, "base"]), (0, "TB2"))
+
+    def test_reorder_counts_the_shades_of_a_base(self):
+        from src.predictor import compute_sales_forecast
+
+        base, (a, b) = self.base_with_shades(stock=40)
+        day = clock.today() - timedelta(days=1)
+        for pid, qty in ((a, 6), (b, 4)):
+            billing.create_bill([{"product_id": pid, "qty": qty}], at=datetime.combine(day, datetime.min.time()).replace(hour=12))
+        fc = compute_sales_forecast(30).set_index("product_id")
+        self.assertIn(base, fc.index)
+        self.assertNotIn(a, fc.index)                                     # shades aren't stock rows
+        self.assertEqual(int(fc.loc[base, "units_sold_30d"]), 10)
+
+    def test_sample_shades_have_bases(self):
+        rows = q("SELECT p.shade_name, b.shade_code FROM products p JOIN products b ON b.id = p.base_id "
+                 "WHERE p.shade_name = 'Royale Blue' AND p.pack_size_litres = 4;")
+        self.assertEqual(len(rows), 1)
+        self.assertRegex(rows[0][1], r"^[A-Z]+B[1-4]$")
+        self.assertEqual(q("SELECT COUNT(*) FROM inventory i JOIN products p ON p.id = i.product_id WHERE p.base_id IS NOT NULL;"),
+                         [(0,)])
+        self.assertEqual(q("SELECT shade_code FROM products WHERE sub_brand = 'Apex Ultima' AND is_base = 1 LIMIT 1;")[0][0][0], "A")
+
+
 class TestCodesAndLabels(unittest.TestCase):
     def test_lookup(self):
         sku = q("SELECT sku FROM products WHERE id = 2;")[0][0]

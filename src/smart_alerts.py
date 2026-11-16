@@ -129,8 +129,9 @@ def _dead_stock_alerts(conn, ref: date) -> List[Dict[str, Any]]:
                (i.current_stock * p.cost_price) as tied_up_capital,
                COALESCE(SUM(s.quantity), 0) as recent_sales
         FROM products p
-        JOIN inventory i ON p.id = i.product_id
-        LEFT JOIN sales s ON p.id = s.product_id
+        JOIN (SELECT product_id, SUM(current_stock) AS current_stock FROM inventory GROUP BY product_id) i
+             ON p.id = i.product_id
+        LEFT JOIN sales_stock s ON p.id = s.stock_id          -- a base sells through its tinted shades
              AND DATE(s.sale_timestamp) > DATE(?, ?) AND DATE(s.sale_timestamp) <= DATE(?)
              AND s.sale_timestamp <= ?
         WHERE i.current_stock >= ?
@@ -269,19 +270,28 @@ def _lost_sale_alerts(ref: date) -> List[Dict[str, Any]]:
     if asked.empty:
         return []
     with sqlite3.connect(DB_PATH, timeout=30) as conn:
+        from src.database import ensure_base_columns
+
+        ensure_base_columns(conn)
         stock = dict(conn.execute("SELECT product_id, SUM(current_stock) FROM inventory GROUP BY product_id;").fetchall())
+        made_from = {int(a): (int(b), c) for a, b, c in conn.execute(
+            "SELECT p.id, COALESCE(p.base_id, p.id), b.shade_code FROM products p LEFT JOIN products b ON b.id = p.base_id;")}
     out = []
     for r in asked.to_dict("records"):
         if r["times"] < 2:
             continue
-        have = int(stock.get(r["product_id"], 0) or 0)
+        sid, base = made_from.get(int(r["product_id"]), (int(r["product_id"]), None))
+        have = int(stock.get(sid, 0) or 0)
+        what = f"{base} bases" if base else "in the shop"
         out.append({
             "type": "LOST_SALE", "group": "Lost sales", "level": "act_now" if r["times"] >= 4 else "soon",
             "severity": "WARNING", "sku": f"lost{r['product_id']}:{ref.isoformat()}", "product_id": int(r["product_id"]),
             "hex_code": r["hex_code"],
             "title": f"{r['label']} — {r['times']} customers left without it this week",
             "description": (f"Staff recorded 'not in stock' for {r['label']} ({r['brand']}) {r['times']} times in 7 days. "
-                            + ("There are none in the shop now." if have == 0 else f"Only {have} in the shop now.")
+                            + (f"There are no {what} now." if have == 0 and base else
+                               "There are none in the shop now." if have == 0 else
+                               f"Only {have} {what} now." if base else f"Only {have} in the shop now.")
                             + " Each one is a sale that walked out — order it, or offer the nearest shade."),
             "action": "Noted",
         })

@@ -96,6 +96,7 @@ def ensure_tables(conn: Optional[sqlite3.Connection] = None) -> None:
     conn = conn or _conn()
     try:
         conn.executescript(BILLING_SQL)
+        _base_columns(conn)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(visits);").fetchall()}
         if cols:
             for c, t in VISIT_COLUMNS.items():
@@ -118,15 +119,26 @@ def label_of(row) -> str:
 
 
 def products() -> pd.DataFrame:
-    """Every product with its stock (all batches) — what the bill screen picks from."""
+    """
+    Every product with what can be sold now — what the bill screen picks from. A tinted shade is
+    available as far as its base is in stock (in_stock is the base's stock; base = its code, e.g. AB2).
+    """
     with _conn() as conn:
+        _base_columns(conn)
         df = pd.read_sql_query(
             "SELECT p.id AS product_id, p.sku, p.brand, p.shade_name, p.hex_code, p.category, p.pack_size_litres, "
-            "p.selling_price, COALESCE(SUM(i.current_stock), 0) AS in_stock FROM products p "
-            "LEFT JOIN inventory i ON i.product_id = p.id GROUP BY p.id ORDER BY p.brand, p.shade_name, p.pack_size_litres;",
-            conn)
+            "p.selling_price, p.is_base, COALESCE(p.base_id, p.id) AS stock_id, b.shade_code AS base, "
+            "COALESCE((SELECT SUM(i.current_stock) FROM inventory i WHERE i.product_id = COALESCE(p.base_id, p.id)), 0) "
+            "AS in_stock FROM products p LEFT JOIN products b ON b.id = p.base_id "
+            "ORDER BY p.is_base, p.brand, p.shade_name, p.pack_size_litres;", conn)
     df["label"] = df.apply(label_of, axis=1)
     return df
+
+
+def _base_columns(conn) -> None:
+    from src.database import ensure_base_columns
+
+    ensure_base_columns(conn)
 
 
 def code_for(sku: str) -> str:
@@ -187,7 +199,8 @@ def create_bill(lines: Sequence[Dict[str, Any]], customer_type: str = "Retail Wa
         ensure_tables(conn)
         conn.execute("BEGIN IMMEDIATE;")                       # one bill at a time: no double-selling the last can
         prices = {r["id"]: r for r in conn.execute(
-            f"SELECT id, shade_name, pack_size_litres, selling_price FROM products WHERE id IN "
+            f"SELECT p.id, p.shade_name, p.pack_size_litres, p.selling_price, COALESCE(p.base_id, p.id) AS stock_id, "
+            f"b.shade_code AS base FROM products p LEFT JOIN products b ON b.id = p.base_id WHERE p.id IN "
             f"({','.join('?' * len(lines))});", [int(l["product_id"]) for l in lines]).fetchall()}
         # merge repeated products
         merged: Dict[int, Dict[str, Any]] = {}
@@ -198,11 +211,20 @@ def create_bill(lines: Sequence[Dict[str, Any]], customer_type: str = "Retail Wa
             m = merged.setdefault(pid, {"product_id": pid, "qty": 0,
                                         "unit_price": float(l.get("unit_price") or prices[pid]["selling_price"])})
             m["qty"] += int(l["qty"])
+        # a tinted shade is sold from its base: shades on the same base share its stock
+        stock_of = {pid: int(prices[pid]["stock_id"]) for pid in merged}
+        need_of: Dict[int, int] = {}
+        for pid, m in merged.items():
+            need_of[stock_of[pid]] = need_of.get(stock_of[pid], 0) + m["qty"]
+        have_of = {sid: int(conn.execute("SELECT COALESCE(SUM(current_stock), 0) FROM inventory WHERE product_id = ?;",
+                                         (sid,)).fetchone()[0]) for sid in need_of}
         short = []
         for pid, m in merged.items():
-            have = conn.execute("SELECT COALESCE(SUM(current_stock), 0) FROM inventory WHERE product_id = ?;", (pid,)).fetchone()[0]
-            if have < m["qty"]:
-                short.append({"product_id": pid, "label": label_of(prices[pid]), "wanted": m["qty"], "in_stock": int(have)})
+            sid = stock_of[pid]
+            if have_of[sid] < need_of[sid]:
+                base = prices[pid]["base"]
+                short.append({"product_id": pid, "label": label_of(prices[pid]) + (f" ({base} base)" if base else ""),
+                              "wanted": need_of[sid], "in_stock": have_of[sid]})
         if short and not allow_short:
             raise StockError(short)
         invoice = _next_invoice(conn, at)
@@ -213,7 +235,7 @@ def create_bill(lines: Sequence[Dict[str, Any]], customer_type: str = "Retail Wa
             need = m["qty"]
             # oldest expiry first, so the shop sells the cans that would expire first
             for b in conn.execute("SELECT id, current_stock FROM inventory WHERE product_id = ? AND current_stock > 0 "
-                                  "ORDER BY expiry_date ASC, purchase_date ASC, id ASC;", (pid,)).fetchall():
+                                  "ORDER BY expiry_date ASC, purchase_date ASC, id ASC;", (stock_of[pid],)).fetchall():
                 if need <= 0:
                     break
                 take = min(need, int(b["current_stock"]))
@@ -225,8 +247,9 @@ def create_bill(lines: Sequence[Dict[str, Any]], customer_type: str = "Retail Wa
             conn.execute("INSERT INTO sales (invoice_no, product_id, quantity, unit_price, total_amount, sale_timestamp, "
                          "customer_type) VALUES (?, ?, ?, ?, ?, ?, ?);",
                          (invoice, pid, m["qty"], m["unit_price"], amount, ts, customer_type))
+        for pid in merged:
             stock_after[pid] = int(conn.execute("SELECT COALESCE(SUM(current_stock), 0) FROM inventory WHERE product_id = ?;",
-                                                (pid,)).fetchone()[0])
+                                                (stock_of[pid],)).fetchone()[0])
         conn.executemany("INSERT INTO bill_stock_moves (invoice_no, inventory_id, product_id, qty) VALUES (?, ?, ?, ?);", moves)
         conn.execute("INSERT INTO bills (invoice_no, created_at, source, customer_type, customer_phone, payment_mode, items, "
                      "total, status) VALUES (?, ?, 'app', ?, ?, ?, ?, ?, 'paid');",
@@ -242,7 +265,7 @@ def create_bill(lines: Sequence[Dict[str, Any]], customer_type: str = "Retail Wa
         "invoice_no": invoice, "created_at": ts, "total": round(total, 2), "customer_type": customer_type,
         "payment_mode": payment_mode, "phone": phone,
         "lines": [{**m, "label": label_of(prices[pid]), "amount": round(m["qty"] * m["unit_price"], 2),
-                   "stock_after": stock_after[pid]} for pid, m in merged.items()],
+                   "stock_after": stock_after[pid], "base": prices[pid]["base"]} for pid, m in merged.items()],
     }
 
 

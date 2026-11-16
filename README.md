@@ -125,6 +125,17 @@ To redraw the three sample rooms: `python data/make_sample_rooms.py`.
 
 ---
 
+## Bases (tinting)
+
+A paint shop doesn't stock "Royale Blue 4 L": it stocks **bases** — each quality line (Apex, Royale, Tractor…) in Base 1 (pastels) to Base 4 (deep colours) and each pack size — and tints the shade at the counter. So the app keeps stock in bases, written the way dealers write them (**AB2** = Apex Base 2):
+
+- each tinted shade knows its base (shown on the bill: *Royale Blue 4 L · tinted from RB4*); primer and waterproofing stay ready-mix;
+- selling a shade takes one base off (FIFO by expiry); shades on the same base share its stock; Void puts it back;
+- **Stock & Reorder → Bases**: cans per base code and pack, what each base tints, low ones in red;
+- reorder, alerts, dead stock, the Deal Checker and Ask Aura work in bases — a base's demand is the sales and forecast of every shade tinted from it.
+
+Asked for by Mohammed Akram Uddin (Galaxy Traders, Sangareddy) when we showed him the prototype.
+
 ## Scan & Bill
 
 The billing counter, inside the app (`src/billing.py`, screen `src/ui/pages/scan_bill.py`).
