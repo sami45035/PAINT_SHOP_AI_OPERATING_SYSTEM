@@ -1,0 +1,187 @@
+[
+ [
+  "page overview: all 2 charts drawn",
+  true,
+  ""
+ ],
+ [
+  "page overview opens cleanly",
+  true,
+  "4.5 s"
+ ],
+ [
+  "page sales-forecast: all 5 charts drawn",
+  true,
+  ""
+ ],
+ [
+  "page sales-forecast opens cleanly",
+  true,
+  "3.9 s"
+ ],
+ [
+  "page colour-studio opens cleanly",
+  true,
+  "9.9 s"
+ ],
+ [
+  "page shade-match opens cleanly",
+  true,
+  "1.9 s"
+ ],
+ [
+  "page scan-bill opens cleanly",
+  true,
+  "2.1 s"
+ ],
+ [
+  "page stock opens cleanly",
+  true,
+  "2.1 s"
+ ],
+ [
+  "page alerts: all 1 charts drawn",
+  true,
+  ""
+ ],
+ [
+  "page alerts opens cleanly",
+  true,
+  "2.2 s"
+ ],
+ [
+  "page camera: all 3 charts drawn",
+  true,
+  ""
+ ],
+ [
+  "page camera opens cleanly",
+  true,
+  "2.2 s"
+ ],
+ [
+  "page ask-aura opens cleanly",
+  true,
+  "2.4 s"
+ ],
+ [
+  "Stock shows bases with what they tint",
+  true,
+  "BASES IN STOCK | 1,675 cans | 20 base codes | RUNNING LOW | 7 | base \u00b7 pack at or below its minimum | SHADES THEY MAKE | 20 | tinted at the counter |  | Find a base |  | A shade is tinted at the counter from its base (Base 1"
+ ],
+ [
+  "Colour Studio paints the sample room",
+  true,
+  "6 picture(s); "
+ ],
+ [
+  "a designer look applies to the photo",
+  true,
+  ""
+ ],
+ [
+  "Shade Match reads a photo and names the closest shade",
+  true,
+  "What colour it is | #C05024 | Terracotta | close to Sienna (standard colour name) |  | RGB |  | 192, 80, 36 |  | Light reflectance |  | 17 |  | Tint on |  | Base 3 | Lighting not corrected tap"
+ ],
+ [
+  "white paper corrects the light: exact match, tint base shown",
+  true,
+  "What colour it is | #C85A32 | Terracotta | close to Chocolate (standard colour name) |  | RGB |  | 200, 90, 50 |  | Light reflectance |  | 20 |  | Tint on |  | Base 3 | Lighting corrected with white paper | 3 | Closest shades we can make | Exact match | Terrac"
+ ],
+ [
+  "Try on a wall opens Colour Studio with that shade",
+  true,
+  "http://localhost:8599/colour-studio"
+ ],
+ [
+  "JS errors in the browser during the tour",
+  true,
+  ""
+ ],
+ [
+  "Set up shows the staff-uniform section",
+  true,
+  ""
+ ],
+ [
+  "Set up has no errors (uniform on)",
+  true,
+  ""
+ ],
+ [
+  "Scan & Bill opens on the phone",
+  true,
+  ""
+ ],
+ [
+  "scanner adds both cans from their QR labels",
+  true,
+  "\ud83d\uded2 2 cans \u20b92,505"
+ ],
+ [
+  "each tinted can shows its base on the bill",
+  true,
+  "\ud83d\uded2 2 cans \u20b92,505 Honey Dew 4 L \u20b91,925 each \u00b7 tinted from IMB1 \u2212 1 + \u20b91,925 Royale Blue 1 L \u20b9580 each \u00b7 tinted from RB4 \u2212 1 + \u20b9580 Cash UPI Card Credit \u21b6 Undo Sav"
+ ],
+ [
+  "after Save: bill shown, camera off",
+  true,
+  "\u2713"
+ ],
+ [
+  "WhatsApp opens with the bill",
+  true,
+  "['https://api.whatsapp.com/send/?phone=919876543210&text=%2AApex+Colors+%26+Paints%2A+%E2%80%94+bill+APX-20261116-001%0A2026-11-16+21%3A05%0A%0A1+%C3%97+Royale+Blue+1+L+%40+%E2%82%B9580+%3D+%E2%82%B9580%0A1+%C3%97+Honey+Dew+4+L+%40+%E2%82%B91%2C925+%3D+%E2%82%B91%2C925%0A%0A%2ATotal%3A+%E2%82%B92%2C505%2A+%28UPI%29%0AThank+you%21&type=phone_number&app_absent=0']"
+ ],
+ [
+  "Next customer: bill cleared, camera on again",
+  true,
+  "Scanning"
+ ],
+ [
+  "bill saved in the database (UPI, phone kept)",
+  true,
+  "[('APX-20261116-001', 2505.0, 'UPI', '919876543210', 'paid')]"
+ ],
+ [
+  "stock went down by one can each",
+  true,
+  "{'SKU-AS-1001': 60, 'SKU-NE-1070': 15} -> {'SKU-AS-1001': 59, 'SKU-NE-1070': 14}"
+ ],
+ [
+  "camera keeps counting during the run",
+  true,
+  "camera: Live \u00b7 counting"
+ ],
+ [
+  "2 customers counted (staff in uniform and the passer-by not)",
+  true,
+  "in/out (2, 2), visits [('2026-11-16 21:05:17', '2026-11-16 21:06:30', 'APX-20261116-001', None), ('2026-11-16 21:06:42', '2026-11-16 21:07:25', None, 'just_asking')]"
+ ],
+ [
+  "customer A bought, customer B didn't (just asking)",
+  true,
+  "[('2026-11-16 21:05:17', '2026-11-16 21:06:30', 'APX-20261116-001', None), ('2026-11-16 21:06:42', '2026-11-16 21:07:25', None, 'just_asking')]"
+ ],
+ [
+  "Visitors & buyers screen shows bought / didn't buy",
+  true,
+  "Numbers from |  | Demo shop |  | This camera |  | Sample history (30 days) |  | Refresh numbers |  | CAME IN | 2 | today | BOUGHT | 50% | 1 of 2 visitors matched to a bill \u00b7 \u20b92,505 | DIDN'T BUY | 1 | of 2 visits \u00b7 top reason: just asking | AVERAGE STAY | 1 min | per visit | BUSIEST HOUR | 9 PM\u201310 PM | 2 came in | Where visitors go | Today, from the d"
+ ],
+ [
+  "no errors on Store Camera after the run",
+  true,
+  ""
+ ],
+ [
+  "no JS errors in either browser",
+  true,
+  ""
+ ],
+ [
+  "server log has no errors",
+  true,
+  ""
+ ]
+]

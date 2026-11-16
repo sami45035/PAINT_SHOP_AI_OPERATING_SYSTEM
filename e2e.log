@@ -1,0 +1,40 @@
+videos in /home/runner/work/_temp/e2e/videos
+PASS page overview: all 2 charts drawn
+PASS page overview opens cleanly — 4.5 s
+PASS page sales-forecast: all 5 charts drawn
+PASS page sales-forecast opens cleanly — 3.9 s
+PASS page colour-studio opens cleanly — 9.9 s
+PASS page shade-match opens cleanly — 1.9 s
+PASS page scan-bill opens cleanly — 2.1 s
+PASS page stock opens cleanly — 2.1 s
+PASS page alerts: all 1 charts drawn
+PASS page alerts opens cleanly — 2.2 s
+PASS page camera: all 3 charts drawn
+PASS page camera opens cleanly — 2.2 s
+PASS page ask-aura opens cleanly — 2.4 s
+PASS Stock shows bases with what they tint — BASES IN STOCK | 1,675 cans | 20 base codes | RUNNING LOW | 7 | base · pack at or below its minimum | SHADES THEY MAKE | 20 | tinted at the counter |  | Find a base |  | A shade is tinted at the counter from its base (Base 1
+PASS Colour Studio paints the sample room — 6 picture(s); 
+PASS a designer look applies to the photo
+PASS Shade Match reads a photo and names the closest shade — What colour it is | #C05024 | Terracotta | close to Sienna (standard colour name) |  | RGB |  | 192, 80, 36 |  | Light reflectance |  | 17 |  | Tint on |  | Base 3 | Lighting not corrected tap
+PASS white paper corrects the light: exact match, tint base shown — What colour it is | #C85A32 | Terracotta | close to Chocolate (standard colour name) |  | RGB |  | 200, 90, 50 |  | Light reflectance |  | 20 |  | Tint on |  | Base 3 | Lighting corrected with white paper | 3 | Closest shades we can make | Exact match | Terrac
+PASS Try on a wall opens Colour Studio with that shade — http://localhost:8599/colour-studio
+PASS JS errors in the browser during the tour
+PASS Set up shows the staff-uniform section
+PASS Set up has no errors (uniform on)
+PASS Scan & Bill opens on the phone
+PASS scanner adds both cans from their QR labels — 🛒 2 cans ₹2,505
+PASS each tinted can shows its base on the bill — 🛒 2 cans ₹2,505 Honey Dew 4 L ₹1,925 each · tinted from IMB1 − 1 + ₹1,925 Royale Blue 1 L ₹580 each · tinted from RB4 − 1 + ₹580 Cash UPI Card Credit ↶ Undo Sav
+PASS after Save: bill shown, camera off — ✓
+PASS WhatsApp opens with the bill — ['https://api.whatsapp.com/send/?phone=919876543210&text=%2AApex+Colors+%26+Paints%2A+%E2%80%94+bill+APX-20261116-001%0A2026-11-16+21%3A05%0A%0A1+%C3%97+Royale+Blue+1+L+%40+%E2%82%B9580+%3D+%E2%82%B9580%0A1+%C3%97+Honey+Dew+4+L+%40+%E2%82%B91%2C925+%3D+%E2%82%B91%2C925%0A%0A%2ATotal%3A+%E2%82%B92%2C505%2A+%28UPI%29%0AThank+you%21&type=phone_number&app_absent=0']
+PASS Next customer: bill cleared, camera on again — Scanning
+PASS bill saved in the database (UPI, phone kept) — [('APX-20261116-001', 2505.0, 'UPI', '919876543210', 'paid')]
+PASS stock went down by one can each — {'SKU-AS-1001': 60, 'SKU-NE-1070': 15} -> {'SKU-AS-1001': 59, 'SKU-NE-1070': 14}
+PASS camera keeps counting during the run — camera: Live · counting
+PASS 2 customers counted (staff in uniform and the passer-by not) — in/out (2, 2), visits [('2026-11-16 21:05:17', '2026-11-16 21:06:30', 'APX-20261116-001', None), ('2026-11-16 21:06:42', '2026-11-16 21:07:25', None, 'just_asking')]
+PASS customer A bought, customer B didn't (just asking) — [('2026-11-16 21:05:17', '2026-11-16 21:06:30', 'APX-20261116-001', None), ('2026-11-16 21:06:42', '2026-11-16 21:07:25', None, 'just_asking')]
+PASS Visitors & buyers screen shows bought / didn't buy — Numbers from |  | Demo shop |  | This camera |  | Sample history (30 days) |  | Refresh numbers |  | CAME IN | 2 | today | BOUGHT | 50% | 1 of 2 visitors matched to a bill · ₹2,505 | DIDN'T BUY | 1 | of 2 visits · top reason: just asking | AVERAGE STAY | 1 min | per visit | BUSIEST HOUR | 9 PM–10 PM | 2 came in | Where visitors go | Today, from the d
+PASS no errors on Store Camera after the run
+PASS no JS errors in either browser
+PASS server log has no errors
+
+37 of 37 checks passed

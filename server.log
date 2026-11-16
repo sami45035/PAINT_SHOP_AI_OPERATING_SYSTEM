@@ -1,0 +1,19 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8599
+  Network URL: http://10.1.0.81:8599
+  External URL: http://20.83.159.14:8599
+
+[0;93m2026-11-16 15:33:58.927754457 [W:onnxruntime:Default, device_discovery.cc:95 GetPciBusId] Skipping pci_bus_id for PCI path at "/sys/devices/LNXSYSTM:00/LNXSYBUS:00/ACPI0004:00/MSFT1000:00/5620e0c7-8062-4dce-aeb7-520c7ef76171" because filename "5620e0c7-8062-4dce-aeb7-520c7ef76171" did not match expected pattern of [0-9a-f]+:[0-9a-f]+:[0-9a-f]+[.][0-9a-f]+[m
+[apex] Python 3.13.18 | streamlit 1.52.2 | pandas 2.3.3 | numpy 2.5.5 | pyarrow 26.0.1 | cv2 4.14.0 | PIL 12.3.0 | plotly 7.1.0 | onnxruntime 1.32.0
+[apex] memory before wall model: 396 MB now, 395 MB peak
+[apex] memory after wall model: 480 MB now, 1056 MB peak
+[apex] memory before wall model: 534 MB now, 1056 MB peak
+[apex] memory after wall model: 591 MB now, 1225 MB peak
+[apex] memory before wall model: 655 MB now, 1225 MB peak
+[apex] memory after wall model: 636 MB now, 1262 MB peak
+[ WARN:12@69.031] global cap_v4l.cpp:914 open VIDEOIO(V4L2:/dev/video0): can't open camera by index
+[ WARN:12@69.031] global cap_ffmpeg_impl.hpp:1246 open VIDEOIO/FFMPEG: OpenCV should be configured with libavdevice to open a camera device
+[ WARN:542@313.784] global cap_v4l.cpp:914 open VIDEOIO(V4L2:/dev/video0): can't open camera by index
+  Stopping...
