@@ -309,7 +309,6 @@ def counter_flow(pw, db: Path):
     settle(laptop)
     pick_radio(laptop, "Webcam")
     settle(laptop)
-    body = laptop.locator("body").inner_text()
     laptop.screenshot(path=str(WORK / "laptop_after.png"), full_page=True)
     visits = q("SELECT entered_at, left_at, bill_no, no_sale_reason FROM visits WHERE source='camera' ORDER BY entered_at")
     foot = q("SELECT SUM(count_in), SUM(count_out) FROM footfall_logs WHERE source='camera'")[0]

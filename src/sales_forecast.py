@@ -184,7 +184,6 @@ def _event_factor(m: GroupModel, d: date) -> float:
 def _fit_group(g: str, days: List[date], y: np.ndarray, events: List[Dict[str, Any]]) -> GroupModel:
     """Ridge regression on log(1 + cans): weekday dummies and festival indicators; then the trend on plain days."""
     n = len(days)
-    t = np.arange(n) / max(1, n - 1)
     cols, names = [np.ones(n)], ["intercept"]
     for k in range(1, 7):                                     # Monday is the reference day
         cols.append(np.array([1.0 if d.weekday() == k else 0.0 for d in days]))

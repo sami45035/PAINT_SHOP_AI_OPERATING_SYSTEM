@@ -141,8 +141,6 @@ BASE_WORD = {1: "pastel", 2: "light", 3: "mid-tone", 4: "deep"}
 
 def base_number(hex_code: str) -> int:
     """Which base a shade is tinted from: by how light it is (more white in the base for pastels)."""
-    import colorsys
-
     h = hex_code.lstrip("#")
     r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
     light = 0.2126 * r + 0.7152 * g + 0.0722 * b

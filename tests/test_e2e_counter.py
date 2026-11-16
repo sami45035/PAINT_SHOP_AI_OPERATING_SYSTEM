@@ -174,7 +174,6 @@ class TestCounterCamera(E2E):
     def test_overview_compares_bills_since_the_camera_started(self):
         """The Overview's 'visitors who bought' can't go over 100% because of sample bills from earlier today."""
         r = run(self.tmp, COUNTER)
-        cam_from = r["visits"][0][0]
         later = datetime.strptime(r["visits"][-1][1], "%Y-%m-%d %H:%M:%S") + timedelta(seconds=10)
         with mock.patch.object(clock, "now_naive", return_value=later), \
                 mock.patch.object(clock, "now", return_value=later), mock.patch.object(clock, "today", return_value=later.date()):
